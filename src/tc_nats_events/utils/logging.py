@@ -192,7 +192,7 @@ class LogContext:
         """
         self.logger = logger
         self.context = context
-        self._old_factory = None
+        self._old_factory: Any = None
 
     def __enter__(self) -> "LogContext":
         """Enter context."""
@@ -206,10 +206,10 @@ class LogContext:
             return record
 
         logging.setLogRecordFactory(record_factory)
-        self._old_factory = old_factory  # type: ignore
+        self._old_factory = old_factory
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Exit context."""
-        if self._old_factory:
+        if self._old_factory is not None:
             logging.setLogRecordFactory(self._old_factory)

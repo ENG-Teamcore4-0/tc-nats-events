@@ -184,16 +184,12 @@ class Event:
         Returns:
             True if event is valid, False otherwise
         """
-        if not self.event_type or not isinstance(self.event_type, str):
-            return False
-
-        if not isinstance(self.data, dict):
-            return False
-
-        if not self.timestamp:
-            return False
-
-        return True
+        return (
+            bool(self.event_type)
+            and isinstance(self.event_type, str)
+            and isinstance(self.data, dict)
+            and bool(self.timestamp)
+        )
 
     def __str__(self) -> str:
         """Human-readable string representation."""

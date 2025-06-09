@@ -91,6 +91,9 @@ class Event:
 
     def __post_init__(self) -> None:
         """Initialize default values for timestamp and metadata."""
+        if self.event_type is None:
+            raise TypeError("event_type cannot be None")
+
         if self.timestamp is None:
             object.__setattr__(
                 self, "timestamp", datetime.now(timezone.utc).isoformat()

@@ -362,7 +362,7 @@ class DurableEventConsumer(BaseEventConsumer):
 
             except Exception as e:
                 self.events_failed += 1
-                event_id = event.metadata.event_id if event.metadata else 'unknown'
+                event_id = event.metadata.event_id if event.metadata else "unknown"
                 logger.error(
                     f"Handler failed for {event.event_type}: {e}, "
                     f"event_id={event_id}",

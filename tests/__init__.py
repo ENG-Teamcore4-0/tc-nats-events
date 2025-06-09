@@ -1,0 +1,1 @@
+"""Tests for TC NATS Events package."""

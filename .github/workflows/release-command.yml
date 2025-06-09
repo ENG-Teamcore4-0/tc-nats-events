@@ -16,24 +16,16 @@ jobs:
     
     steps:
     - name: Check if user has permission
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const permission = await github.rest.repos.getCollaboratorPermissionLevel({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            username: context.actor
-          });
-          
-          if (!['admin', 'write'].includes(permission.data.permission)) {
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '❌ You do not have permission to create releases.'
-            });
-            core.setFailed('Insufficient permissions');
-          }
+      run: |
+        # Check user permission using GitHub CLI
+        PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission --jq '.permission')
+        
+        if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" ]]; then
+          gh issue comment ${{ github.event.issue.number }} --body "❌ You do not have permission to create releases."
+          exit 1
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Parse release command
       id: parse
@@ -69,21 +61,21 @@ jobs:
 
     - name: Get PR details
       id: pr
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const pr = await github.rest.pulls.get({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            pull_number: context.issue.number
-          });
-          
-          return {
-            ref: pr.data.head.ref,
-            sha: pr.data.head.sha,
-            merged: pr.data.merged,
-            mergeable: pr.data.mergeable
-          };
+      run: |
+        # Get PR details using GitHub CLI
+        PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.issue.number }})
+        
+        PR_REF=$(echo "$PR_DATA" | jq -r '.head.ref')
+        PR_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+        PR_MERGED=$(echo "$PR_DATA" | jq -r '.merged')
+        PR_MERGEABLE=$(echo "$PR_DATA" | jq -r '.mergeable')
+        
+        echo "ref=$PR_REF" >> $GITHUB_OUTPUT
+        echo "sha=$PR_SHA" >> $GITHUB_OUTPUT
+        echo "merged=$PR_MERGED" >> $GITHUB_OUTPUT
+        echo "mergeable=$PR_MERGEABLE" >> $GITHUB_OUTPUT
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -119,54 +111,71 @@ jobs:
         echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
     - name: React to comment
-      uses: actions/github-script@v7
-      with:
-        script: |
-          github.rest.reactions.createForIssueComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            comment_id: context.payload.comment.id,
-            content: 'rocket'
-          });
+      run: |
+        # Add rocket reaction to comment using GitHub CLI
+        gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+          --method POST \
+          --field content=rocket
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Comment release plan
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const newVersion = '${{ steps.version.outputs.version }}';
-          const prerelease = '${{ steps.parse.outputs.prerelease }}' === 'true';
-          
-          const body = `🚀 **Release Plan**
-          
-          - **New Version**: \`${newVersion}\`
-          - **Release Type**: \`${{ steps.parse.outputs.type }}\`
-          - **Prerelease**: ${prerelease ? '✅ Yes' : '❌ No'}
-          
-          The release will be created once this PR is merged.
-          
-          ---
-          
-          *This is an automated response to the \`/release\` command.*`;
-          
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: body
-          });
+      run: |
+        # Create release plan comment
+        NEW_VERSION="${{ steps.version.outputs.version }}"
+        PRERELEASE_FLAG="${{ steps.parse.outputs.prerelease }}"
+        
+        if [ "$PRERELEASE_FLAG" == "true" ]; then
+          PRERELEASE_TEXT="✅ Yes"
+        else
+          PRERELEASE_TEXT="❌ No"
+        fi
+        
+        COMMENT_BODY="🚀 **Release Plan**
 
-    - name: Trigger release workflow
+        - **New Version**: \`${NEW_VERSION}\`
+        - **Release Type**: \`${{ steps.parse.outputs.type }}\`
+        - **Prerelease**: ${PRERELEASE_TEXT}
+        
+        The release will be created once this PR is merged.
+        
+        ---
+        
+        *This is an automated response to the \`/release\` command.*"
+        
+        gh issue comment ${{ github.event.issue.number }} --body "$COMMENT_BODY"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create release (if PR is merged)
       if: steps.pr.outputs.merged == 'true'
-      uses: actions/github-script@v7
-      with:
-        script: |
-          github.rest.actions.createWorkflowDispatch({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            workflow_id: 'release.yml',
-            ref: 'main',
-            inputs: {
-              version: '${{ steps.version.outputs.version }}',
-              prerelease: '${{ steps.parse.outputs.prerelease }}'
-            }
-          });
+      run: |
+        echo "🚀 PR is merged. Creating release now..."
+        
+        # Update version in pyproject.toml
+        sed -i 's/version = ".*"/version = "${{ steps.version.outputs.version }}"/' pyproject.toml
+        
+        # Commit and tag
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add pyproject.toml
+        git commit -m "Release ${{ steps.version.outputs.version }}"
+        
+        TAG="v${{ steps.version.outputs.version }}"
+        git tag -a $TAG -m "Release $TAG"
+        git push origin main --tags
+        
+        echo "✅ Version updated and tagged. Auto-release workflow will handle the rest."
+        
+        # Comment on the PR
+        gh issue comment ${{ github.event.issue.number }} --body "✅ Release $TAG created! The CI will run and then the release will be published automatically."
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Wait for auto-release (if PR not merged yet)
+      if: steps.pr.outputs.merged != 'true'
+      run: |
+        echo "⏳ PR not merged yet. Release will be created when PR is merged and version is committed."
+        gh issue comment ${{ github.event.issue.number }} --body "⏳ Release will be created automatically when this PR is merged."
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

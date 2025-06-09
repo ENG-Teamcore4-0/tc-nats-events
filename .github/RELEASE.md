@@ -11,10 +11,10 @@ Se ejecuta automáticamente cuando:
 
 **Funcionamiento:**
 1. Detecta cambios en la versión del código
-2. Ejecuta los tests automáticamente
-3. Crea un tag git con la nueva versión
+2. **Ejecuta CI completo** (lint, format, type check, tests)
+3. **Solo si el CI pasa:** crea un tag git con la nueva versión
 4. Genera el release en GitHub con changelog automático
-5. Publica en PyPI
+5. Crea archivos descargables (.whl y .tar.gz)
 
 ## 2. Release Manual (`release.yml`)
 
@@ -59,7 +59,8 @@ Se ejecuta desde comentarios en Pull Requests:
 1. Comenta en un PR con el comando `/release`
 2. El bot calcula la nueva versión
 3. Responde con el plan de release
-4. Cuando el PR se mergea, se ejecuta el release
+4. Cuando el PR se mergea, actualiza la versión y hace commit
+5. **El auto-release detecta el cambio y ejecuta CI + release**
 
 ## Permisos Necesarios
 
@@ -97,7 +98,7 @@ Los releases incluyen automáticamente:
 ### Instalación desde GitHub
 ```bash
 # Instalar última versión
-pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@latest
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git
 
 # Instalar versión específica
 pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v1.0.0

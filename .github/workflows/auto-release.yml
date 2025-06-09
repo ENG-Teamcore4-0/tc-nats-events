@@ -64,8 +64,13 @@ jobs:
           echo "should-release=false" >> $GITHUB_OUTPUT
         fi
 
-  auto-release:
+  ci:
     needs: check-version
+    if: needs.check-version.outputs.should-release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  auto-release:
+    needs: [check-version, ci]
     if: needs.check-version.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -87,10 +92,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[dev,test]"
-    
-    - name: Run tests
-      run: |
-        pytest tests/ -v --cov=tc_nats_events
     
     - name: Install build dependencies
       run: |
@@ -145,17 +146,14 @@ jobs:
         echo "\`\`\`" >> RELEASE_NOTES.md
     
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ needs.check-version.outputs.current-tag }}
-        name: "Release ${{ needs.check-version.outputs.current-tag }}"
-        body_path: RELEASE_NOTES.md
-        files: |
-          dist/*.tar.gz
-          dist/*.whl
-        draft: false
-        prerelease: ${{ contains(needs.check-version.outputs.current-tag, 'alpha') || contains(needs.check-version.outputs.current-tag, 'beta') || contains(needs.check-version.outputs.current-tag, 'rc') }}
-        generate_release_notes: true
+      run: |
+        # Create release using GitHub CLI
+        gh release create ${{ needs.check-version.outputs.current-tag }} \
+          --title "Release ${{ needs.check-version.outputs.current-tag }}" \
+          --notes-file RELEASE_NOTES.md \
+          --target main \
+          ${{ contains(needs.check-version.outputs.current-tag, 'alpha') || contains(needs.check-version.outputs.current-tag, 'beta') || contains(needs.check-version.outputs.current-tag, 'rc') && '--prerelease' || '' }} \
+          dist/*.tar.gz dist/*.whl
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
@@ -167,7 +165,7 @@ jobs:
     #     skip-existing: true
 
   notify-success:
-    needs: [check-version, auto-release]
+    needs: [check-version, ci, auto-release]
     if: needs.check-version.outputs.should-release == 'true' && success()
     runs-on: ubuntu-latest
     

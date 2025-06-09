@@ -30,7 +30,7 @@ This is an internal Teamcore package. Install directly from GitHub:
 
 ### Latest Release (Recommended)
 ```bash
-pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@latest
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git
 ```
 
 ### Specific Version

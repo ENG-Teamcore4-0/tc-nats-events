@@ -179,10 +179,21 @@ class DurableEventConsumer(BaseEventConsumer):
     async def _setup_consumer(self) -> None:
         """Setup durable consumer configuration."""
         try:
+            # First, check if stream exists
+            if self._js is None:
+                raise ConsumerError("JetStream context not initialized")
+            
+            try:
+                await self._js.stream_info(self.stream_name)
+                logger.info(f"Stream '{self.stream_name}' exists")
+            except nats.js.errors.NotFoundError:
+                raise ConsumerError(
+                    f"Stream '{self.stream_name}' not found. "
+                    "Please ensure the EventStore is connected and the stream is created."
+                )
+            
             # Check if consumer exists
             try:
-                if self._js is None:
-                    raise ConsumerError("JetStream context not initialized")
                 info = await self._js.consumer_info(
                     self.stream_name, self.consumer_name
                 )

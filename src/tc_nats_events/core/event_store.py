@@ -168,18 +168,16 @@ class NATSEventStore:
             # Retention limits
             max_msgs=self.config.max_messages,
             max_bytes=self.config.max_bytes,
-            max_age=self.config.max_age_seconds * 1_000_000_000,  # nanoseconds
+            max_age=self.config.max_age_seconds,  # seconds as expected by NATS
             # Performance settings
             max_msg_size=self.config.max_msg_size,
-            duplicate_window=120 * 1_000_000_000,  # 2 minutes deduplication
+            duplicate_window=120,  # 2 minutes deduplication
             # Replication for durability (production should use 3+)
             num_replicas=self.config.replicas,
             # Allow direct access for fast reads
             allow_direct=True,
             # Ensure message ordering per subject
             discard_new_per_subject=False,
-            # Enable mirroring if needed
-            mirror_direct=True,
         )
 
         if self._js is None:
@@ -244,7 +242,7 @@ class NATSEventStore:
                 raise EventStoreError("JetStream context not initialized")
 
             ack = await self._js.publish(
-                subject=subject, payload=event.to_json(), headers=headers
+                subject=subject, payload=event.to_json(), headers=headers, timeout=10
             )
 
             # Record metrics

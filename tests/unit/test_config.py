@@ -36,7 +36,7 @@ class TestNATSConfig:
 
         assert config.max_messages == 1_000_000
         assert config.max_bytes == 1024 * 1024 * 1024
-        assert config.max_age_seconds == 30 * 24 * 60 * 60
+        assert config.max_age_seconds == 7 * 24 * 60 * 60
         assert config.max_msg_size == 1024 * 1024
         assert config.replicas == 1
 

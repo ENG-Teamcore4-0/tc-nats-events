@@ -37,7 +37,7 @@ class NATSConfig:
     # Stream retention
     max_messages: int = 1_000_000
     max_bytes: int = 1024 * 1024 * 1024  # 1GB
-    max_age_seconds: int = 30 * 24 * 60 * 60  # 30 days
+    max_age_seconds: int = 7 * 24 * 60 * 60  # 7 days
     max_msg_size: int = 1024 * 1024  # 1MB
     replicas: int = 1
 
@@ -93,7 +93,7 @@ class NATSConfig:
             subject_prefix=get_env("SUBJECT_PREFIX", "app.events"),
             max_messages=get_env_int("MAX_MESSAGES", 1_000_000),
             max_bytes=get_env_int("MAX_BYTES", 1024 * 1024 * 1024),
-            max_age_seconds=get_env_int("MAX_AGE_SECONDS", 30 * 24 * 60 * 60),
+            max_age_seconds=get_env_int("MAX_AGE_SECONDS", 7 * 24 * 60 * 60),
             max_msg_size=get_env_int("MAX_MSG_SIZE", 1024 * 1024),
             replicas=get_env_int("REPLICAS", 1),
             max_deliver_attempts=get_env_int("MAX_DELIVER_ATTEMPTS", 3),

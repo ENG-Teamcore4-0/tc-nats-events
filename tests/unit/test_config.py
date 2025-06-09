@@ -6,7 +6,6 @@ Test the NATSConfig class and configuration loading.
 """
 
 import json
-import os
 import tempfile
 from pathlib import Path
 

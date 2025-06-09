@@ -6,11 +6,9 @@ Common fixtures and configuration for all tests.
 """
 
 import asyncio
-from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import pytest_asyncio
 
 from tc_nats_events import Event, EventMetadata, NATSConfig
 

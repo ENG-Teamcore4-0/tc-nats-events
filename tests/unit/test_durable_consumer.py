@@ -7,7 +7,7 @@ Test the DurableEventConsumer class.
 
 import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nats
 import pytest
@@ -17,8 +17,7 @@ from tc_nats_events.consumers.durable_consumer import (
     DurableEventConsumer,
 )
 from tc_nats_events.models.event import Event
-from tc_nats_events.utils.config import NATSConfig
-from tc_nats_events.utils.exceptions import ConnectionError, ConsumerError
+from tc_nats_events.utils.exceptions import ConsumerError
 
 
 class TestDurableEventConsumer:
@@ -71,6 +70,7 @@ class TestDurableEventConsumer:
             async def mock_fetch(*args, **kwargs):
                 await asyncio.sleep(0.01)  # Small delay to prevent tight loop
                 return []
+
             mock_subscription.fetch = mock_fetch
 
             await consumer.start()
@@ -311,7 +311,7 @@ class TestDurableEventConsumer:
         # Create a mock task that can be cancelled and awaited
         async def mock_task_coro():
             pass
-        
+
         mock_task = asyncio.create_task(mock_task_coro())
         consumer._processing_task = mock_task
 
@@ -322,7 +322,9 @@ class TestDurableEventConsumer:
 
         assert not consumer._is_running
         assert consumer.state == ConsumerState.STOPPED
-        assert mock_task.cancelled() or mock_task.done()  # Task should be cancelled or completed
+        assert (
+            mock_task.cancelled() or mock_task.done()
+        )  # Task should be cancelled or completed
         mock_nats_client.drain.assert_called_once()
         mock_nats_client.close.assert_called_once()
 

@@ -5,21 +5,17 @@ Unit Tests for Event Store
 Test the NATSEventStore class.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nats
 import pytest
-from nats.js.errors import BadRequestError, NotFoundError
+from nats.js.errors import NotFoundError
 
 from tc_nats_events.core.event_store import NATSEventStore
-from tc_nats_events.models.event import Event, EventMetadata
-from tc_nats_events.utils.config import NATSConfig
+from tc_nats_events.models.event import Event
 from tc_nats_events.utils.exceptions import (
     ConnectionError,
-    EventStoreError,
     PublishError,
-    StreamConfigError,
 )
 
 

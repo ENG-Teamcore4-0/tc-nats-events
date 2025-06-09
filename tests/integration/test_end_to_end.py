@@ -10,7 +10,7 @@ Run with: docker run -d -p 4222:4222 nats:latest -js
 
 import asyncio
 import os
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import pytest
 
@@ -18,7 +18,6 @@ from tc_nats_events import (
     DurableEventConsumer,
     Event,
     EventPublisher,
-    EventType,
     NATSConfig,
     setup_logging,
 )
@@ -60,10 +59,10 @@ class TestEndToEnd:
             # Try to delete existing stream
             try:
                 await store._js.delete_stream(config.stream_name)
-            except:
+            except Exception:
                 pass  # Stream might not exist
             await store.disconnect()
-        except:
+        except Exception:
             pass
 
         yield
@@ -73,7 +72,7 @@ class TestEndToEnd:
             await store.connect()
             await store._js.delete_stream(config.stream_name)
             await store.disconnect()
-        except:
+        except Exception:
             pass
 
     @pytest.mark.asyncio
@@ -89,6 +88,7 @@ class TestEndToEnd:
 
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
+
         store = NATSEventStore(config)
         await store.connect()
 
@@ -135,9 +135,10 @@ class TestEndToEnd:
         """Test that durable consumer recovers from where it left off."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
+
         store = NATSEventStore(config)
         await store.connect()
-        
+
         try:
             # First, publish some events
             publisher = EventPublisher("test-publisher", config)
@@ -162,10 +163,10 @@ class TestEndToEnd:
             # Wait for sync and processing of all events
             while not consumer1.is_synced:
                 await asyncio.sleep(0.1)
-            
+
             # Give time to process all events
             await asyncio.sleep(2)
-            
+
             await consumer1.stop()
 
             # Start new consumer with same name
@@ -189,10 +190,14 @@ class TestEndToEnd:
             await consumer2.stop()
 
             # For now, simplified test - just verify that durable consumer functionality works
-            # The complex recovery scenario requires more sophisticated setup 
-            assert len(consumed_first) == 10, f"First consumer should have processed all 10 events: {consumed_first}"
+            # The complex recovery scenario requires more sophisticated setup
+            assert (
+                len(consumed_first) == 10
+            ), f"First consumer should have processed all 10 events: {consumed_first}"
             # Second consumer should not receive any new events as all were already processed
-            assert len(consumed_second) == 0, f"Second consumer should not receive events as all were processed: {consumed_second}"
+            assert (
+                len(consumed_second) == 0
+            ), f"Second consumer should not receive events as all were processed: {consumed_second}"
         finally:
             await store.disconnect()
 
@@ -201,9 +206,10 @@ class TestEndToEnd:
         """Test load balancing between multiple consumers."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
+
         store = NATSEventStore(config)
         await store.connect()
-        
+
         # Track which consumer processed each event
         consumer1_events: List[int] = []
         consumer2_events: List[int] = []
@@ -261,9 +267,10 @@ class TestEndToEnd:
         """Test that events are processed in order."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
+
         store = NATSEventStore(config)
         await store.connect()
-        
+
         received_sequences: List[int] = []
 
         async def handle_ordered(event: Event):
@@ -323,9 +330,10 @@ class TestEndToEnd:
             max_deliver_attempts=5,
             ack_wait_seconds=2,
         )
-        
+
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
+
         store = NATSEventStore(retry_config)
         await store.connect()
 
@@ -346,7 +354,9 @@ class TestEndToEnd:
 
             # Verify event was processed (even if only once due to idempotency)
             # The fact that we see multiple errors in logs shows retry is working at NATS level
-            assert process_attempts["retry-1"] >= 1, f"Event should be processed at least once: {process_attempts}"
+            assert (
+                process_attempts["retry-1"] >= 1
+            ), f"Event should be processed at least once: {process_attempts}"
             # For now, we'll accept that idempotency prevents multiple handler executions
             # This is actually correct behavior in production
 
@@ -362,5 +372,5 @@ class TestEndToEnd:
                 await cleanup_store.connect()
                 await cleanup_store._js.delete_stream(retry_config.stream_name)
                 await cleanup_store.disconnect()
-            except:
+            except Exception:
                 pass

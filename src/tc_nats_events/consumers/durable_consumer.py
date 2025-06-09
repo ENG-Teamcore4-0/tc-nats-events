@@ -9,7 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import nats
 from nats.aio.client import Client as NATS
@@ -182,7 +182,7 @@ class DurableEventConsumer(BaseEventConsumer):
             # First, check if stream exists
             if self._js is None:
                 raise ConsumerError("JetStream context not initialized")
-            
+
             try:
                 await self._js.stream_info(self.stream_name)
                 logger.info(f"Stream '{self.stream_name}' exists")
@@ -191,7 +191,7 @@ class DurableEventConsumer(BaseEventConsumer):
                     f"Stream '{self.stream_name}' not found. "
                     "Please ensure the EventStore is connected and the stream is created."
                 )
-            
+
             # Check if consumer exists
             try:
                 info = await self._js.consumer_info(
@@ -255,46 +255,63 @@ class DurableEventConsumer(BaseEventConsumer):
 
         while self._is_running:
             try:
-                # Fetch batch of messages
-                if self._subscription is None:
-                    raise ConsumerError("Subscription not initialized")
-                messages = await self._subscription.fetch(
-                    batch=self.batch_size, timeout=self.fetch_timeout
-                )
-
-                if messages:
-                    await self._process_batch(messages)
-                    self._consecutive_errors = 0  # Reset error counter
-
-                    # Log progress during sync
-                    if self._consumer_state == ConsumerState.SYNCING:
-                        logger.info(
-                            f"Syncing: processed {len(messages)} events, "
-                            f"total={self.events_processed}"
-                        )
-                else:
-                    # No messages - check if sync complete
-                    if self._consumer_state == ConsumerState.SYNCING:
-                        await self._complete_sync()
-
+                messages = await self._fetch_messages()
+                await self._handle_messages(messages)
             except asyncio.TimeoutError:
-                # Normal timeout - no new messages
-                if self._consumer_state == ConsumerState.SYNCING:
-                    await self._complete_sync()
-
+                await self._handle_timeout()
             except Exception as e:
-                self._consecutive_errors += 1
-                logger.error(f"Processing error (#{self._consecutive_errors}): {e}")
-
-                if self._consecutive_errors >= self._max_consecutive_errors:
-                    logger.error("Max consecutive errors reached, stopping")
-                    self._consumer_state = ConsumerState.ERROR
+                if not await self._handle_processing_error(e):
                     break
 
-                # Backoff on error
-                await asyncio.sleep(min(self._consecutive_errors, 10))
-
         logger.info(f"Event processing loop ended for {self.service_name}")
+
+    async def _fetch_messages(self) -> List[Msg]:
+        """Fetch batch of messages from subscription."""
+        if self._subscription is None:
+            raise ConsumerError("Subscription not initialized")
+        return cast(
+            List[Msg],
+            await self._subscription.fetch(
+                batch=self.batch_size, timeout=self.fetch_timeout
+            ),
+        )
+
+    async def _handle_messages(self, messages: List[Msg]) -> None:
+        """Handle fetched messages."""
+        if messages:
+            await self._process_batch(messages)
+            self._consecutive_errors = 0  # Reset error counter
+
+            # Log progress during sync
+            if self._consumer_state == ConsumerState.SYNCING:
+                logger.info(
+                    f"Syncing: processed {len(messages)} events, "
+                    f"total={self.events_processed}"
+                )
+        else:
+            # No messages - check if sync complete
+            if self._consumer_state == ConsumerState.SYNCING:
+                await self._complete_sync()
+
+    async def _handle_timeout(self) -> None:
+        """Handle timeout when fetching messages."""
+        # Normal timeout - no new messages
+        if self._consumer_state == ConsumerState.SYNCING:
+            await self._complete_sync()
+
+    async def _handle_processing_error(self, error: Exception) -> bool:
+        """Handle processing errors. Returns True to continue, False to stop."""
+        self._consecutive_errors += 1
+        logger.error(f"Processing error (#{self._consecutive_errors}): {error}")
+
+        if self._consecutive_errors >= self._max_consecutive_errors:
+            logger.error("Max consecutive errors reached, stopping")
+            self._consumer_state = ConsumerState.ERROR
+            return False
+
+        # Backoff on error
+        await asyncio.sleep(min(self._consecutive_errors, 10))
+        return True
 
     async def _process_batch(self, messages: List[Msg]) -> None:
         """Process a batch of messages."""

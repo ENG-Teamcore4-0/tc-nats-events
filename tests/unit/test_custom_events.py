@@ -5,8 +5,6 @@ Unit Tests for Custom Events
 Test the flexibility of creating custom event types.
 """
 
-from datetime import datetime, timezone
-
 import pytest
 
 from tc_nats_events.models.event import Event, EventMetadata, EventType, create_event

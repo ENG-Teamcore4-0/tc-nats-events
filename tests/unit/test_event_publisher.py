@@ -5,15 +5,13 @@ Unit Tests for Event Publisher
 Test the EventPublisher class.
 """
 
-import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from tc_nats_events.models.event import Event, EventMetadata, EventType
 from tc_nats_events.publishers.event_publisher import EventPublisher
-from tc_nats_events.utils.config import NATSConfig
 from tc_nats_events.utils.exceptions import PublishError
 
 

@@ -6,9 +6,6 @@ Test the metrics collection functionality.
 """
 
 import time
-from unittest.mock import patch
-
-import pytest
 
 from tc_nats_events.utils.metrics import (
     EventMetrics,

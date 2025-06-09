@@ -13,15 +13,20 @@ jobs:
       matrix:
         python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     
-    services:
-      nats:
-        image: nats:latest
-        ports:
-          - 4222:4222
-        options: --name nats --entrypoint /nats-server -- -js -m 8222 -p 4222
-    
     steps:
     - uses: actions/checkout@v3
+    
+    - name: Start NATS Server
+      run: |
+        docker run -d --name nats-server \
+          -p 4222:4222 -p 8222:8222 \
+          nats:alpine \
+          --jetstream --http_port 8222
+        
+        # Wait for NATS to be ready
+        sleep 5
+        timeout 30s bash -c 'until curl -f http://localhost:8222/varz; do sleep 1; done'
+        echo "NATS server is ready"
     
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4

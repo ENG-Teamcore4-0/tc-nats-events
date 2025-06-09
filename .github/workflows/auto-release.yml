@@ -159,11 +159,12 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
-    - name: Publish to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        repository-url: https://upload.pypi.org/legacy/
-        skip-existing: true
+    # Note: PyPI publishing disabled for internal package
+    # - name: Publish to PyPI
+    #   uses: pypa/gh-action-pypi-publish@release/v1
+    #   with:
+    #     repository-url: https://upload.pypi.org/legacy/
+    #     skip-existing: true
 
   notify-success:
     needs: [check-version, auto-release]
@@ -175,4 +176,4 @@ jobs:
       run: |
         echo "✅ Successfully released version ${{ needs.check-version.outputs.new-version }}"
         echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.current-tag }}"
-        echo "📦 PyPI URL: https://pypi.org/project/tc-nats-events/${{ needs.check-version.outputs.new-version }}/"
+        echo "📦 Install with: pip install git+https://github.com/${{ github.repository }}.git@${{ needs.check-version.outputs.current-tag }}"

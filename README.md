@@ -1,8 +1,9 @@
 # TC NATS Events
 
 [![CI](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml)
-
-[![Release](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/release.yml/badge.svg)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/ENG-Teamcore4-0/tc-nats-events)](https://github.com/ENG-Teamcore4-0/tc-nats-events/releases)
+[![Python versions](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/ENG-Teamcore4-0/tc-nats-events.svg)](https://github.com/ENG-Teamcore4-0/tc-nats-events/blob/main/LICENSE)
 
 Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team
 
@@ -25,8 +26,45 @@ TC NATS Events is a Python package that implements Event Sourcing and Durable Co
 
 ## 📦 Installation
 
+This is an internal Teamcore package. Install directly from GitHub:
+
+### Latest Release (Recommended)
 ```bash
-pip install tc-nats-events
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@latest
+```
+
+### Specific Version
+```bash
+# Install a specific version tag
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v0.1.1
+
+# Or install from a specific branch
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@main
+```
+
+### With SSH (for authenticated access)
+```bash
+pip install git+ssh://git@github.com/ENG-Teamcore4-0/tc-nats-events.git
+```
+
+### For Development
+```bash
+# Clone and install in editable mode
+git clone git@github.com:ENG-Teamcore4-0/tc-nats-events.git
+cd tc-nats-events
+pip install -e ".[dev,test]"
+```
+
+### In requirements.txt
+```txt
+# Add to your requirements.txt
+git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v0.1.1
+```
+
+### In pyproject.toml
+```toml
+[project.dependencies]
+tc-nats-events = { git = "https://github.com/ENG-Teamcore4-0/tc-nats-events.git", tag = "v0.1.1" }
 ```
 
 For development:

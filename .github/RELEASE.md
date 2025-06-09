@@ -67,16 +67,14 @@ Se ejecuta desde comentarios en Pull Requests:
 - **Manual release**: Cualquier usuario con permisos de escritura
 - **Release command**: Solo usuarios con permisos `admin` o `write`
 
-## Configuración de PyPI
+## Configuración (Paquete Interno)
 
-Para que la publicación en PyPI funcione, configura **Trusted Publishing**:
+Este es un paquete interno de Teamcore que se distribuye vía GitHub releases, no PyPI.
 
-1. Ve a [PyPI Trusted Publishing](https://pypi.org/manage/account/publishing/)
-2. Agrega una nueva configuración:
-   - **Owner**: `tu-usuario-github`
-   - **Repository**: `tc-nats-events`
-   - **Workflow**: `auto-release.yml` y `release.yml`
-   - **Environment**: (dejar vacío)
+Los workflows automáticamente:
+- Crean releases en GitHub con archivos descargables
+- Generan tags para instalación con pip desde GitHub
+- **No publican en PyPI** (esto está deshabilitado para paquetes internos)
 
 ## Formato de Versiones
 
@@ -96,9 +94,14 @@ Los releases incluyen automáticamente:
 - Verifica que la versión en `pyproject.toml` haya cambiado
 - Asegúrate de que no solo se modificaron archivos de documentación
 
-### Error de permisos en PyPI
-- Configura Trusted Publishing como se describe arriba
-- O agrega `PYPI_API_TOKEN` en los secrets del repositorio
+### Instalación desde GitHub
+```bash
+# Instalar última versión
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@latest
+
+# Instalar versión específica
+pip install git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v1.0.0
+```
 
 ### El comando `/release` no funciona
 - Verifica que tengas permisos de escritura en el repositorio

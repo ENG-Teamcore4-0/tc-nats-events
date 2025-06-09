@@ -262,9 +262,9 @@ class TestIdempotentEventProcessor:
             return f"{arg1}-{arg2}-{kwarg1}"
         
         result = await processor.process_with_idempotency(
-            event_id="event-123",
-            handler_name="handler_with_args",
-            handler_func=handler_with_args,
+            "event-123",
+            "handler_with_args", 
+            handler_with_args,
             "value1", "value2", kwarg1="kwvalue"
         )
         

@@ -346,9 +346,9 @@ class DurableEventConsumer(BaseEventConsumer):
             try:
                 # Process with idempotency guarantee
                 await self._idempotent_processor.process_with_idempotency(
-                    event_id=event.metadata.event_id,
-                    handler_name=f"{self.service_name}.{event.event_type}",
-                    handler_func=handler,
+                    event.metadata.event_id,
+                    f"{self.service_name}.{event.event_type}",
+                    handler,
                     event
                 )
                     

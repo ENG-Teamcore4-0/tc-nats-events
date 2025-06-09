@@ -18,6 +18,10 @@ jobs:
     
     - name: Start NATS Server
       run: |
+        # Clean up any existing container
+        docker rm -f nats-server || true
+        
+        # Start fresh NATS server
         docker run -d --name nats-server \
           -p 4222:4222 -p 8222:8222 \
           nats:alpine \

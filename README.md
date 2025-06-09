@@ -1,6 +1,6 @@
 # TC NATS Events
 
-Event Sourcing and Durable Consumers for NATS JetStream - TeamCore Platform
+Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team
 
 ## 🚀 Overview
 
@@ -383,4 +383,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Built on top of [nats-py](https://github.com/nats-io/nats.py)
 - Inspired by Event Sourcing and CQRS patterns
-- Designed for TeamCore's microservices architecture
+- Designed for Teamcore Architecture Team

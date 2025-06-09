@@ -6,7 +6,7 @@ Thank you for your interest in contributing to TC NATS Events! This document pro
 
 1. Fork and clone the repository:
 ```bash
-git clone https://github.com/your-username/tc-nats-events.git
+git clone https://github.com/ENG-Teamcore4-0/tc-nats-events
 cd tc-nats-events
 ```
 

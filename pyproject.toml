@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tc-nats-events"
 version = "0.1.0"
-description = "Event Sourcing and Durable Consumers for NATS JetStream - TeamCore Platform"
+description = "Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "TeamCore Platform Team", email = "platform@teamcore.net"},
+    {name = "Teamcore Architecture Team", email = "architecture@teamcore.net"},
 ]
 maintainers = [
     {name = "David Gómez Garcia", email = "david.gomez@teamcore.net"},

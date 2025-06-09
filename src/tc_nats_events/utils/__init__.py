@@ -1,31 +1,29 @@
 """Utilities for TC NATS Events package."""
 
 from .config import NATSConfig
-from .logging import setup_logging, get_logger
 from .exceptions import (
-    TCNATSError,
     ConnectionError,
-    PublishError,
     ConsumerError,
     EventStoreError,
+    PublishError,
     StreamConfigError,
+    TCNATSError,
 )
-from .metrics import MetricsCollector, get_metrics_collector, get_all_metrics
 from .idempotency import (
-    IdempotentEventProcessor,
     IdempotencyKey,
+    IdempotentEventProcessor,
+    generate_deterministic_id,
     get_idempotent_processor,
-    generate_deterministic_id
 )
+from .logging import get_logger, setup_logging
+from .metrics import MetricsCollector, get_all_metrics, get_metrics_collector
 
 __all__ = [
     # Configuration
     "NATSConfig",
-    
     # Logging
     "setup_logging",
     "get_logger",
-    
     # Exceptions
     "TCNATSError",
     "ConnectionError",
@@ -33,12 +31,10 @@ __all__ = [
     "ConsumerError",
     "EventStoreError",
     "StreamConfigError",
-    
     # Metrics
     "MetricsCollector",
     "get_metrics_collector",
     "get_all_metrics",
-    
     # Idempotency
     "IdempotentEventProcessor",
     "IdempotencyKey",

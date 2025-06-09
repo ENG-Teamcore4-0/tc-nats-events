@@ -6,12 +6,13 @@ Common fixtures and configuration for all tests.
 """
 
 import asyncio
-import pytest
-import pytest_asyncio
 from typing import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock
 
-from tc_nats_events import NATSConfig, Event, EventMetadata
+import pytest
+import pytest_asyncio
+
+from tc_nats_events import Event, EventMetadata, NATSConfig
 
 
 @pytest.fixture(scope="session")
@@ -48,8 +49,8 @@ def sample_event():
             correlation_id="corr-123",
             source_service="test-service",
             user_id="user-123",
-            environment="test"
-        )
+            environment="test",
+        ),
     )
 
 
@@ -63,9 +64,8 @@ def sample_events():
                 event_type=f"test.event_{i}",
                 data={"id": str(i), "value": f"value_{i}"},
                 metadata=EventMetadata(
-                    event_id=f"event-{i}",
-                    source_service="test-service"
-                )
+                    event_id=f"event-{i}", source_service="test-service"
+                ),
             )
         )
     return events
@@ -84,7 +84,7 @@ def mock_nats_client():
 def mock_jetstream():
     """Create a mock JetStream context."""
     js = AsyncMock()
-    
+
     # Mock stream info
     stream_info = MagicMock()
     stream_info.config.subjects = ["test.events.*"]
@@ -93,21 +93,21 @@ def mock_jetstream():
     stream_info.state.first_seq = 1
     stream_info.state.last_seq = 100
     stream_info.state.consumer_count = 2
-    
+
     js.stream_info = AsyncMock(return_value=stream_info)
-    
+
     # Mock publish
     ack = MagicMock()
     ack.seq = 101
     ack.stream = "test-events"
     js.publish = AsyncMock(return_value=ack)
-    
+
     # Mock consumer info
     consumer_info = MagicMock()
     consumer_info.delivered.stream_seq = 50
     consumer_info.num_ack_pending = 5
     js.consumer_info = AsyncMock(return_value=consumer_info)
-    
+
     return js
 
 
@@ -115,41 +115,41 @@ def mock_jetstream():
 def mock_subscription():
     """Create a mock subscription."""
     subscription = AsyncMock()
-    
+
     # Mock message
     msg = AsyncMock()
     msg.data = b'{"event_type": "test.created", "data": {"id": "123"}, "timestamp": "2024-01-01T00:00:00Z"}'
     msg.metadata.sequence.stream = 1
-    
+
     # Mock fetch
     subscription.fetch = AsyncMock(return_value=[msg])
-    
+
     return subscription
 
 
 class MockNATSMessage:
     """Mock NATS message for testing."""
-    
+
     def __init__(self, data: bytes, sequence: int = 1):
         self.data = data
         self.metadata = MagicMock()
         self.metadata.sequence.stream = sequence
         self._acked = False
         self._nacked = False
-    
+
     async def ack(self):
         """Mock acknowledgment."""
         self._acked = True
-    
+
     async def nak(self):
         """Mock negative acknowledgment."""
         self._nacked = True
-    
+
     @property
     def is_acked(self):
         """Check if message was acknowledged."""
         return self._acked
-    
+
     @property
     def is_nacked(self):
         """Check if message was negatively acknowledged."""
@@ -163,14 +163,12 @@ def mock_nats_message():
         "event_type": "test.created",
         "data": {"id": "123", "name": "Test"},
         "timestamp": "2024-01-01T00:00:00Z",
-        "metadata": {
-            "event_id": "evt-123",
-            "source_service": "test"
-        }
+        "metadata": {"event_id": "evt-123", "source_service": "test"},
     }
-    
+
     import json
-    return MockNATSMessage(json.dumps(event_data).encode('utf-8'))
+
+    return MockNATSMessage(json.dumps(event_data).encode("utf-8"))
 
 
 @pytest.fixture

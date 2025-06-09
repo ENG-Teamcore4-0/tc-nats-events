@@ -17,9 +17,9 @@ Main features:
 __version__ = "0.1.0"
 __author__ = "TeamCore Platform Team"
 
-from .models.event import Event, EventMetadata, EventType, create_event
-from .core.event_store import NATSEventStore
 from .consumers.durable_consumer import DurableEventConsumer
+from .core.event_store import NATSEventStore
+from .models.event import Event, EventMetadata, EventType, create_event
 from .publishers.event_publisher import EventPublisher
 from .utils.config import NATSConfig
 from .utils.logging import setup_logging
@@ -30,16 +30,12 @@ __all__ = [
     "EventMetadata",
     "EventType",
     "create_event",
-    
     # Core
     "NATSEventStore",
-    
     # Consumers
     "DurableEventConsumer",
-    
     # Publishers
     "EventPublisher",
-    
     # Utils
     "NATSConfig",
     "setup_logging",

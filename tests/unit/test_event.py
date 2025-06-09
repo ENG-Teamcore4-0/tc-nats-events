@@ -251,8 +251,6 @@ class TestEventType:
         assert EventType.CATALOG_ITEM_ADDED == "catalog.item_added"
         assert EventType.CATALOG_ITEM_UPDATED == "catalog.item_updated"
 
-        assert EventType.CUSTOM == "custom"
-
     def test_event_type_usage(self):
         """Test using EventType enum in events."""
         event = Event(

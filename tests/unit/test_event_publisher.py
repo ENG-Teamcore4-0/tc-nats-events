@@ -203,13 +203,9 @@ class TestEventPublisher:
         """Test batch publishing with some failures."""
         publisher._event_store = mock_event_store
 
-        # Make second event fail
-        call_count = 0
-
+        # Make second event fail (the one with id "2")
         async def publish_selective_failure(event):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
+            if event.data.get("id") == "2":
                 raise Exception("Failed")
             return 42
 

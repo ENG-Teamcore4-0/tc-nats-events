@@ -199,7 +199,7 @@ class TestMetricsCollector:
 
         metrics = collector.get_metrics()
         assert metrics["events_published"] == 1
-        assert len(metrics["publish_stats"]["count"]) > 0
+        assert metrics["publish_stats"]["count"] > 0
 
     def test_consume_flow(self):
         """Test consume metrics flow."""

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..core.event_store import NATSEventStore
 from ..models.event import Event, EventMetadata, EventType
@@ -181,7 +181,7 @@ class EventPublisher:
         )
 
     async def publish_batch(
-        self, events: List[tuple[str, Dict[str, Any]]]
+        self, events: List[Tuple[str, Dict[str, Any]]]
     ) -> List[int]:
         """
         Publish multiple events in a batch.
@@ -323,6 +323,6 @@ class EventPublisher:
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.disconnect()

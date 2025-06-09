@@ -8,7 +8,7 @@ Configuration classes for NATS connection and stream settings.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -70,7 +70,7 @@ class NATSConfig:
             NATSConfig instance
         """
 
-        def get_env(key: str, default=None):
+        def get_env(key: str, default: Any = None) -> Any:
             return os.getenv(f"{prefix}{key}", default)
 
         def get_env_int(key: str, default: int) -> int:

@@ -8,13 +8,21 @@ Core event store implementation using NATS JetStream for persistent event storag
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import nats
 from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NATSTimeoutError
 from nats.js import JetStreamContext
-from nats.js.api import ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
+from nats.js.api import (
+    AckPolicy,
+    ConsumerConfig,
+    DeliverPolicy,
+    ReplayPolicy,
+    RetentionPolicy,
+    StorageType,
+    StreamConfig,
+)
 
 from ..models.event import Event
 from ..utils.config import NATSConfig
@@ -85,8 +93,7 @@ class NATSEventStore:
                 logger.info(f"Connecting to NATS at {self.config.servers}")
 
                 # Connection options with resilience
-                options = {
-                    "servers": self.config.servers,
+                connect_options = {
                     "name": f"{self.config.client_name}-eventstore",
                     "reconnect_time_wait": self.config.reconnect_time_wait,
                     "max_reconnect_attempts": self.config.max_reconnect_attempts,
@@ -98,10 +105,12 @@ class NATSEventStore:
 
                 # Add authentication if configured
                 if self.config.user and self.config.password:
-                    options["user"] = self.config.user
-                    options["password"] = self.config.password
+                    connect_options["user"] = self.config.user
+                    connect_options["password"] = self.config.password
 
-                self._nc = await nats.connect(**options)
+                self._nc = await nats.connect(
+                    servers=self.config.servers, **connect_options
+                )
                 self._js = self._nc.jetstream()
 
                 # Ensure stream exists
@@ -124,11 +133,17 @@ class NATSEventStore:
         try:
             # Check if stream exists
             try:
+                if self._js is None:
+                    raise EventStoreError("JetStream context not initialized")
                 stream_info = await self._js.stream_info(self.stream_name)
                 logger.info(f"Stream '{self.stream_name}' already exists")
 
                 # Update stream if subjects changed
-                current_subjects = set(stream_info.config.subjects)
+                current_subjects = (
+                    set(stream_info.config.subjects)
+                    if stream_info.config.subjects
+                    else set()
+                )
                 expected_subjects = {f"{self.subject_prefix}.*"}
 
                 if current_subjects != expected_subjects:
@@ -158,7 +173,7 @@ class NATSEventStore:
             max_msg_size=self.config.max_msg_size,
             duplicate_window=120 * 1_000_000_000,  # 2 minutes deduplication
             # Replication for durability (production should use 3+)
-            replicas=self.config.replicas,
+            num_replicas=self.config.replicas,
             # Allow direct access for fast reads
             allow_direct=True,
             # Ensure message ordering per subject
@@ -167,16 +182,22 @@ class NATSEventStore:
             mirror_direct=True,
         )
 
+        if self._js is None:
+            raise EventStoreError("JetStream context not initialized")
         await self._js.add_stream(config)
         logger.info(f"Stream '{self.stream_name}' created successfully")
 
     async def _update_stream_config(self) -> None:
         """Update existing stream configuration."""
+        if self._js is None:
+            raise EventStoreError("JetStream context not initialized")
         stream_info = await self._js.stream_info(self.stream_name)
 
         config = stream_info.config
         config.subjects = [f"{self.subject_prefix}.*"]
 
+        if self._js is None:
+            raise EventStoreError("JetStream context not initialized")
         await self._js.update_stream(config)
         logger.info(f"Stream '{self.stream_name}' configuration updated")
 
@@ -207,6 +228,9 @@ class NATSEventStore:
 
         try:
             # Publish with acknowledgment and idempotency headers
+            if event.metadata is None:
+                raise EventStoreError("Event metadata is required for publishing")
+
             headers = {
                 "event-id": event.metadata.event_id,
                 "event-type": event.event_type,
@@ -215,6 +239,9 @@ class NATSEventStore:
                 "causation-id": event.metadata.causation_id or "",
                 "timestamp": event.timestamp,
             }
+
+            if self._js is None:
+                raise EventStoreError("JetStream context not initialized")
 
             ack = await self._js.publish(
                 subject=subject, payload=event.to_json(), headers=headers
@@ -280,6 +307,8 @@ class NATSEventStore:
             raise ConnectionError("Not connected to NATS")
 
         try:
+            if self._js is None:
+                raise EventStoreError("JetStream context not initialized")
             info = await self._js.stream_info(self.stream_name)
 
             return {
@@ -290,7 +319,11 @@ class NATSEventStore:
                 "first_seq": info.state.first_seq,
                 "last_seq": info.state.last_seq,
                 "consumer_count": info.state.consumer_count,
-                "created": str(info.created),
+                "created": (
+                    str(info.created)
+                    if hasattr(info, "created") and info.created
+                    else None
+                ),
                 "cluster": {
                     "name": info.cluster.name if info.cluster else None,
                     "leader": info.cluster.leader if info.cluster else None,
@@ -318,14 +351,16 @@ class NATSEventStore:
             name=consumer_name,
             durable_name=consumer_name,
             filter_subjects=filter_subjects or [f"{self.subject_prefix}.*"],
-            ack_policy="explicit",
-            replay_policy="instant",
-            deliver_policy="all",
+            ack_policy=AckPolicy.EXPLICIT,
+            replay_policy=ReplayPolicy.INSTANT,
+            deliver_policy=DeliverPolicy.ALL,
             max_deliver=3,
             ack_wait=30,
             max_ack_pending=1000,
         )
 
+        if self._js is None:
+            raise EventStoreError("JetStream context not initialized")
         await self._js.add_consumer(self.stream_name, config)
         logger.info(f"Consumer '{consumer_name}' created")
 
@@ -334,6 +369,8 @@ class NATSEventStore:
     async def delete_consumer(self, consumer_name: str) -> None:
         """Delete a consumer."""
         try:
+            if self._js is None:
+                raise EventStoreError("JetStream context not initialized")
             await self._js.delete_consumer(self.stream_name, consumer_name)
             logger.info(f"Consumer '{consumer_name}' deleted")
         except Exception as e:
@@ -389,20 +426,20 @@ class NATSEventStore:
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.disconnect()
 
     # Utility methods
 
     @asynccontextmanager
-    async def transaction(self):
+    async def transaction(self) -> Any:
         """
         Context manager for transactional event publishing.
 
         Note: This is a logical transaction, not ACID.
         """
-        events = []
+        events: List[Event] = []
 
         try:
             yield events

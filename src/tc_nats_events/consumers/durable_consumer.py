@@ -9,7 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import nats
 from nats.aio.client import Client as NATS
@@ -20,7 +20,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, ReplayPolicy
 from ..models.event import Event
 from ..utils.config import NATSConfig
 from ..utils.exceptions import ConnectionError, ConsumerError
-from ..utils.idempotency import IdempotencyKey, get_idempotent_processor
+from ..utils.idempotency import get_idempotent_processor
 from ..utils.metrics import get_metrics_collector
 from .base_consumer import BaseEventConsumer
 
@@ -76,7 +76,7 @@ class DurableEventConsumer(BaseEventConsumer):
         # NATS components
         self._nc: Optional[NATS] = None
         self._js: Optional[JetStreamContext] = None
-        self._subscription = None
+        self._subscription: Optional[Any] = None
 
         # Consumer configuration
         self.stream_name = config.stream_name
@@ -101,6 +101,11 @@ class DurableEventConsumer(BaseEventConsumer):
         # Metrics and idempotency
         self._metrics = get_metrics_collector(service_name)
         self._idempotent_processor = get_idempotent_processor()
+
+        # Processing counters
+        self.events_processed: int = 0
+        self.events_failed: int = 0
+        self.last_processed_sequence: int = 0
 
     @property
     def state(self) -> ConsumerState:
@@ -150,18 +155,19 @@ class DurableEventConsumer(BaseEventConsumer):
     async def _connect(self) -> None:
         """Connect to NATS server."""
         try:
-            options = {
-                "servers": self.config.servers,
+            connect_options = {
                 "name": f"{self.config.client_name}-{self.service_name}",
                 "reconnect_time_wait": self.config.reconnect_time_wait,
                 "max_reconnect_attempts": self.config.max_reconnect_attempts,
             }
 
             if self.config.user and self.config.password:
-                options["user"] = self.config.user
-                options["password"] = self.config.password
+                connect_options["user"] = self.config.user
+                connect_options["password"] = self.config.password
 
-            self._nc = await nats.connect(**options)
+            self._nc = await nats.connect(
+                servers=self.config.servers, **connect_options
+            )
             self._js = self._nc.jetstream()
 
             logger.info("Connected to NATS for consumer")
@@ -175,6 +181,8 @@ class DurableEventConsumer(BaseEventConsumer):
         try:
             # Check if consumer exists
             try:
+                if self._js is None:
+                    raise ConsumerError("JetStream context not initialized")
                 info = await self._js.consumer_info(
                     self.stream_name, self.consumer_name
                 )
@@ -189,6 +197,8 @@ class DurableEventConsumer(BaseEventConsumer):
                 await self._create_consumer()
 
             # Create pull subscription
+            if self._js is None:
+                raise ConsumerError("JetStream context not initialized")
             self._subscription = await self._js.pull_subscribe(
                 subject="",  # Empty - uses consumer's filter
                 durable=self.consumer_name,
@@ -220,6 +230,8 @@ class DurableEventConsumer(BaseEventConsumer):
             sample_freq=None,
         )
 
+        if self._js is None:
+            raise ConsumerError("JetStream context not initialized")
         await self._js.add_consumer(self.stream_name, config)
         logger.info(f"Created durable consumer: {self.consumer_name}")
 
@@ -233,6 +245,8 @@ class DurableEventConsumer(BaseEventConsumer):
         while self._is_running:
             try:
                 # Fetch batch of messages
+                if self._subscription is None:
+                    raise ConsumerError("Subscription not initialized")
                 messages = await self._subscription.fetch(
                     batch=self.batch_size, timeout=self.fetch_timeout
                 )
@@ -299,15 +313,15 @@ class DurableEventConsumer(BaseEventConsumer):
 
             # Update metrics
             self.events_processed += 1
-            self.last_processed_sequence = event.sequence
+            self.last_processed_sequence = event.sequence or 0
             self._metrics.record_consume_success(start_time)
 
             logger.debug(
-                f"Message processed successfully",
+                "Message processed successfully",
                 extra={
                     "event_type": event.event_type,
                     "sequence": event.sequence,
-                    "event_id": event.metadata.event_id,
+                    "event_id": event.metadata.event_id if event.metadata else None,
                     "service_name": self.service_name,
                 },
             )
@@ -337,6 +351,8 @@ class DurableEventConsumer(BaseEventConsumer):
         if handler:
             try:
                 # Process with idempotency guarantee
+                if event.metadata is None:
+                    raise ConsumerError("Event metadata is required")
                 await self._idempotent_processor.process_with_idempotency(
                     event.metadata.event_id,
                     f"{self.service_name}.{event.event_type}",
@@ -346,12 +362,13 @@ class DurableEventConsumer(BaseEventConsumer):
 
             except Exception as e:
                 self.events_failed += 1
+                event_id = event.metadata.event_id if event.metadata else 'unknown'
                 logger.error(
                     f"Handler failed for {event.event_type}: {e}, "
-                    f"event_id={event.metadata.event_id}",
+                    f"event_id={event_id}",
                     extra={
                         "event_type": event.event_type,
-                        "event_id": event.metadata.event_id,
+                        "event_id": event.metadata.event_id if event.metadata else None,
                         "service_name": self.service_name,
                         "error": str(e),
                     },
@@ -376,7 +393,8 @@ class DurableEventConsumer(BaseEventConsumer):
             self._sync_complete_time = datetime.now(timezone.utc)
 
             sync_duration = (
-                self._sync_complete_time - self._sync_start_time
+                self._sync_complete_time
+                - (self._sync_start_time or self._sync_complete_time)
             ).total_seconds()
 
             logger.info(
@@ -430,9 +448,12 @@ class DurableEventConsumer(BaseEventConsumer):
 
         if self._sync_complete_time:
             status["sync_complete_time"] = self._sync_complete_time.isoformat()
-            status["sync_duration_seconds"] = (
-                self._sync_complete_time - self._sync_start_time
-            ).total_seconds()
+            status["sync_duration_seconds"] = int(
+                (
+                    self._sync_complete_time
+                    - (self._sync_start_time or self._sync_complete_time)
+                ).total_seconds()
+            )
 
         return status
 
@@ -443,6 +464,6 @@ class DurableEventConsumer(BaseEventConsumer):
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.stop()

@@ -1,5 +1,9 @@
 # TC NATS Events
 
+[![CI](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml)
+
+[![Release](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/release.yml/badge.svg)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/release.yml)
+
 Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team
 
 ## 🚀 Overview

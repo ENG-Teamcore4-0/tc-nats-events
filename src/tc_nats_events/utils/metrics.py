@@ -7,7 +7,7 @@ Metrics collection and monitoring utilities for TC NATS Events.
 
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any

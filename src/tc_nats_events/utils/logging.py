@@ -9,7 +9,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
 class StructuredFormatter(logging.Formatter):
@@ -117,7 +117,7 @@ def setup_logging(
     console_handler = logging.StreamHandler(sys.stdout)
 
     if structured:
-        console_formatter = StructuredFormatter()
+        console_formatter: logging.Formatter = StructuredFormatter()
     else:
         console_format = (
             "%(asctime)s | %(levelname)-8s | %(name)-20s | "
@@ -149,7 +149,7 @@ def setup_logging(
     if service_name:
 
         class ServiceFilter(logging.Filter):
-            def filter(self, record):
+            def filter(self, record: logging.LogRecord) -> bool:
                 record.service_name = service_name
                 return True
 
@@ -182,7 +182,7 @@ def get_logger(name: str) -> logging.Logger:
 class LogContext:
     """Context manager for adding context to log messages."""
 
-    def __init__(self, logger: logging.Logger, **context):
+    def __init__(self, logger: logging.Logger, **context: Any):
         """
         Initialize log context.
 
@@ -194,22 +194,22 @@ class LogContext:
         self.context = context
         self._old_factory = None
 
-    def __enter__(self):
+    def __enter__(self) -> "LogContext":
         """Enter context."""
         old_factory = logging.getLogRecordFactory()
         context = self.context
 
-        def record_factory(*args, **kwargs):
+        def record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
             record = old_factory(*args, **kwargs)
             for key, value in context.items():
                 setattr(record, key, value)
             return record
 
         logging.setLogRecordFactory(record_factory)
-        self._old_factory = old_factory
+        self._old_factory = old_factory  # type: ignore
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Exit context."""
         if self._old_factory:
             logging.setLogRecordFactory(self._old_factory)

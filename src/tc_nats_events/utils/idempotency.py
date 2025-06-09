@@ -5,12 +5,13 @@ Idempotency Utilities
 Utilities for ensuring idempotent event processing.
 """
 
+import asyncio
 import hashlib
 import json
 import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 
 class IdempotencyKey:
@@ -34,7 +35,7 @@ class IdempotencyKey:
     def __hash__(self) -> int:
         return hash(self.key)
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, IdempotencyKey):
             return self.key == other.key
         return False
@@ -137,7 +138,12 @@ class IdempotentEventProcessor:
         self.store = store or InMemoryIdempotencyStore()
 
     async def process_with_idempotency(
-        self, event_id: str, handler_name: str, handler_func, *args, **kwargs
+        self,
+        event_id: str,
+        handler_name: str,
+        handler_func: Any,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """
         Process event with idempotency guarantee.
@@ -218,7 +224,3 @@ def get_idempotent_processor() -> IdempotentEventProcessor:
         if _global_processor is None:
             _global_processor = IdempotentEventProcessor()
         return _global_processor
-
-
-# Import asyncio here to avoid circular imports
-import asyncio

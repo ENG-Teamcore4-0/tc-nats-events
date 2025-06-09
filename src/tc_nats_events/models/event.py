@@ -10,7 +10,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 
 class EventType(str, Enum):
@@ -89,7 +89,7 @@ class Event:
     metadata: Optional[EventMetadata] = None
     sequence: Optional[int] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize default values for timestamp and metadata."""
         if self.timestamp is None:
             object.__setattr__(
@@ -106,7 +106,7 @@ class Event:
         Returns:
             UTF-8 encoded JSON bytes
         """
-        event_dict = {
+        event_dict: Dict[str, Any] = {
             "event_type": self.event_type,
             "data": self.data,
             "timestamp": self.timestamp,
@@ -204,7 +204,7 @@ class Event:
         )
 
     @classmethod
-    def create(cls, event_type: str, data: Dict[str, Any], **kwargs) -> "Event":
+    def create(cls, event_type: str, data: Dict[str, Any], **kwargs: Any) -> "Event":
         """Factory method for creating events with any event type.
 
         Args:
@@ -244,7 +244,7 @@ class Event:
         )
 
 
-def create_event(event_type: str, data: Dict[str, Any], **kwargs) -> Event:
+def create_event(event_type: str, data: Dict[str, Any], **kwargs: Any) -> Event:
     """Convenience function for creating events with any event type.
 
     This is a module-level function that provides the same functionality

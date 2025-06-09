@@ -1,0 +1,178 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - 'docs/**'
+      - 'examples/**'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.version-check.outputs.should-release }}
+      new-version: ${{ steps.version-check.outputs.new-version }}
+      current-tag: ${{ steps.version-check.outputs.current-tag }}
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    
+    - name: Check version changes
+      id: version-check
+      run: |
+        # Get current version from setup.py or pyproject.toml
+        if [ -f "pyproject.toml" ]; then
+          CURRENT_VERSION=$(grep -E '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+        elif [ -f "setup.py" ]; then
+          CURRENT_VERSION=$(python -c "import setup; print(setup.version)" 2>/dev/null || echo "")
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(grep -E "version\s*=" setup.py | sed -E 's/.*version\s*=\s*["\x27]([^"\x27]+)["\x27].*/\1/')
+          fi
+        else
+          echo "No version file found"
+          exit 1
+        fi
+        
+        echo "Current version in code: $CURRENT_VERSION"
+        
+        # Get latest tag
+        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        LATEST_VERSION=${LATEST_TAG#v}
+        
+        echo "Latest tag version: $LATEST_VERSION"
+        
+        # Compare versions
+        if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+          echo "Version changed from $LATEST_VERSION to $CURRENT_VERSION"
+          echo "should-release=true" >> $GITHUB_OUTPUT
+          echo "new-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "current-tag=v$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "Version unchanged"
+          echo "should-release=false" >> $GITHUB_OUTPUT
+        fi
+
+  auto-release:
+    needs: check-version
+    if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[dev,test]"
+    
+    - name: Run tests
+      run: |
+        pytest tests/ -v --cov=tc_nats_events
+    
+    - name: Install build dependencies
+      run: |
+        pip install build twine
+    
+    - name: Build package
+      run: |
+        python -m build
+    
+    - name: Check package
+      run: |
+        twine check dist/*
+    
+    - name: Create git tag
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -a ${{ needs.check-version.outputs.current-tag }} -m "Release ${{ needs.check-version.outputs.current-tag }}"
+        git push origin ${{ needs.check-version.outputs.current-tag }}
+    
+    - name: Generate changelog
+      id: changelog
+      run: |
+        NEW_TAG="${{ needs.check-version.outputs.current-tag }}"
+        PREV_TAG=$(git describe --tags --abbrev=0 $NEW_TAG^ 2>/dev/null || echo "")
+        
+        echo "# Release $NEW_TAG" > RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        
+        if [ -n "$PREV_TAG" ]; then
+          echo "## Changes since $PREV_TAG" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          
+          # Get commits since last tag
+          COMMITS=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD --no-merges)
+          if [ -n "$COMMITS" ]; then
+            echo "$COMMITS" >> RELEASE_NOTES.md
+          else
+            echo "- Version bump to ${{ needs.check-version.outputs.new-version }}" >> RELEASE_NOTES.md
+          fi
+        else
+          echo "## Initial Release" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "- Initial release of tc-nats-events" >> RELEASE_NOTES.md
+        fi
+        
+        echo "" >> RELEASE_NOTES.md
+        echo "## Installation" >> RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        echo "\`\`\`bash" >> RELEASE_NOTES.md
+        echo "pip install tc-nats-events==${{ needs.check-version.outputs.new-version }}" >> RELEASE_NOTES.md
+        echo "\`\`\`" >> RELEASE_NOTES.md
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ needs.check-version.outputs.current-tag }}
+        name: "Release ${{ needs.check-version.outputs.current-tag }}"
+        body_path: RELEASE_NOTES.md
+        files: |
+          dist/*.tar.gz
+          dist/*.whl
+        draft: false
+        prerelease: ${{ contains(needs.check-version.outputs.current-tag, 'alpha') || contains(needs.check-version.outputs.current-tag, 'beta') || contains(needs.check-version.outputs.current-tag, 'rc') }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://upload.pypi.org/legacy/
+        skip-existing: true
+
+  notify-success:
+    needs: [check-version, auto-release]
+    if: needs.check-version.outputs.should-release == 'true' && success()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Notify success
+      run: |
+        echo "✅ Successfully released version ${{ needs.check-version.outputs.new-version }}"
+        echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.current-tag }}"
+        echo "📦 PyPI URL: https://pypi.org/project/tc-nats-events/${{ needs.check-version.outputs.new-version }}/"

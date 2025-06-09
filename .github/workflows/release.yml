@@ -1,9 +1,20 @@
-name: Release
+name: Manual Release
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -39,22 +50,51 @@ jobs:
       run: |
         twine check dist/*
     
-    - name: Extract tag name
+    - name: Extract or set version
       id: tag
-      run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          VERSION="${{ github.event.inputs.version }}"
+          TAG="v$VERSION"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Create tag for manual release
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a $TAG -m "Release $TAG"
+          git push origin $TAG
+        else
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        fi
     
     - name: Generate changelog
       id: changelog
       run: |
-        # Extract version from tag (remove 'v' prefix)
-        VERSION=${GITHUB_REF#refs/tags/v}
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        VERSION="${{ steps.tag.outputs.version }}"
         
         # Generate changelog from git log
         echo "# Release ${{ steps.tag.outputs.tag }}" > CHANGELOG.md
         echo "" >> CHANGELOG.md
         echo "## Changes" >> CHANGELOG.md
-        git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> CHANGELOG.md || echo "- Initial release" >> CHANGELOG.md
+        
+        # Get previous tag for comparison
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$PREV_TAG" ]; then
+          git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD --no-merges >> CHANGELOG.md
+        else
+          echo "- Initial release" >> CHANGELOG.md
+        fi
+        
+        echo "" >> CHANGELOG.md
+        echo "## Installation" >> CHANGELOG.md
+        echo "" >> CHANGELOG.md
+        echo "\`\`\`bash" >> CHANGELOG.md
+        echo "pip install tc-nats-events==$VERSION" >> CHANGELOG.md
+        echo "\`\`\`" >> CHANGELOG.md
     
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -66,7 +106,8 @@ jobs:
           dist/*.tar.gz
           dist/*.whl
         draft: false
-        prerelease: ${{ contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') || contains(steps.tag.outputs.tag, 'rc') }}
+        prerelease: ${{ github.event.inputs.prerelease == 'true' || contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') || contains(steps.tag.outputs.tag, 'rc') }}
+        generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     

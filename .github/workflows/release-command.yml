@@ -1,0 +1,172 @@
+name: Release Command
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  release:
+    if: github.event.issue.pull_request && contains(github.event.comment.body, '/release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    
+    steps:
+    - name: Check if user has permission
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const permission = await github.rest.repos.getCollaboratorPermissionLevel({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            username: context.actor
+          });
+          
+          if (!['admin', 'write'].includes(permission.data.permission)) {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ You do not have permission to create releases.'
+            });
+            core.setFailed('Insufficient permissions');
+          }
+
+    - name: Parse release command
+      id: parse
+      run: |
+        COMMENT="${{ github.event.comment.body }}"
+        
+        # Extract version type (patch, minor, major) or specific version
+        if echo "$COMMENT" | grep -q "/release patch"; then
+          echo "type=patch" >> $GITHUB_OUTPUT
+        elif echo "$COMMENT" | grep -q "/release minor"; then
+          echo "type=minor" >> $GITHUB_OUTPUT
+        elif echo "$COMMENT" | grep -q "/release major"; then
+          echo "type=major" >> $GITHUB_OUTPUT
+        elif echo "$COMMENT" | grep -qE "/release [0-9]+\.[0-9]+\.[0-9]+"; then
+          VERSION=$(echo "$COMMENT" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
+          echo "type=custom" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "type=patch" >> $GITHUB_OUTPUT
+        fi
+        
+        # Check for prerelease flag
+        if echo "$COMMENT" | grep -q -- "--prerelease"; then
+          echo "prerelease=true" >> $GITHUB_OUTPUT
+        else
+          echo "prerelease=false" >> $GITHUB_OUTPUT
+        fi
+
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+
+    - name: Get PR details
+      id: pr
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const pr = await github.rest.pulls.get({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: context.issue.number
+          });
+          
+          return {
+            ref: pr.data.head.ref,
+            sha: pr.data.head.sha,
+            merged: pr.data.merged,
+            mergeable: pr.data.mergeable
+          };
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install bump2version
+
+    - name: Calculate new version
+      id: version
+      run: |
+        # Get current version
+        if [ -f "pyproject.toml" ]; then
+          CURRENT_VERSION=$(grep -E '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+        else
+          CURRENT_VERSION=$(grep -E "version\s*=" setup.py | sed -E 's/.*version\s*=\s*["\x27]([^"\x27]+)["\x27].*/\1/')
+        fi
+        
+        echo "Current version: $CURRENT_VERSION"
+        
+        if [ "${{ steps.parse.outputs.type }}" == "custom" ]; then
+          NEW_VERSION="${{ steps.parse.outputs.version }}"
+        else
+          # Use bump2version to calculate new version
+          bump2version --dry-run --list ${{ steps.parse.outputs.type }} > version_info.txt
+          NEW_VERSION=$(grep "new_version=" version_info.txt | cut -d= -f2)
+        fi
+        
+        echo "New version: $NEW_VERSION"
+        echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: React to comment
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.reactions.createForIssueComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            comment_id: context.payload.comment.id,
+            content: 'rocket'
+          });
+
+    - name: Comment release plan
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const newVersion = '${{ steps.version.outputs.version }}';
+          const prerelease = '${{ steps.parse.outputs.prerelease }}' === 'true';
+          
+          const body = `🚀 **Release Plan**
+          
+          - **New Version**: \`${newVersion}\`
+          - **Release Type**: \`${{ steps.parse.outputs.type }}\`
+          - **Prerelease**: ${prerelease ? '✅ Yes' : '❌ No'}
+          
+          The release will be created once this PR is merged.
+          
+          ---
+          
+          *This is an automated response to the \`/release\` command.*`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
+
+    - name: Trigger release workflow
+      if: steps.pr.outputs.merged == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.actions.createWorkflowDispatch({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            workflow_id: 'release.yml',
+            ref: 'main',
+            inputs: {
+              version: '${{ steps.version.outputs.version }}',
+              prerelease: '${{ steps.parse.outputs.prerelease }}'
+            }
+          });

@@ -18,8 +18,7 @@ jobs:
         image: nats:latest
         ports:
           - 4222:4222
-        options: --name nats -v /tmp/nats:/tmp/nats --entrypoint /nats-server
-        args: -js -m 8222 -p 4222
+        options: --name nats --entrypoint /nats-server -- -js -m 8222 -p 4222
     
     steps:
     - uses: actions/checkout@v3

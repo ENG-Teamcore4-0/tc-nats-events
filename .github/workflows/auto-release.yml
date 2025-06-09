@@ -145,7 +145,7 @@ jobs:
         echo "\`\`\`" >> RELEASE_NOTES.md
     
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ needs.check-version.outputs.current-tag }}
         name: "Release ${{ needs.check-version.outputs.current-tag }}"

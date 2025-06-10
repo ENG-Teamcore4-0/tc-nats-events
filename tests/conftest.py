@@ -85,7 +85,7 @@ def mock_jetstream():
 
     # Mock stream info
     stream_info = MagicMock()
-    stream_info.config.subjects = ["test.events.*"]
+    stream_info.config.subjects = ["test.events.>"]
     stream_info.state.messages = 100
     stream_info.state.bytes = 10000
     stream_info.state.first_seq = 1

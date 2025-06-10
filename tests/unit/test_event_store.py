@@ -74,7 +74,7 @@ class TestNATSEventStore:
         call_args = mock_jetstream.add_stream.call_args[0][0]
 
         assert call_args.name == event_store.stream_name
-        assert call_args.subjects == [f"{event_store.subject_prefix}.*"]
+        assert call_args.subjects == [f"{event_store.subject_prefix}.>"]
 
     @pytest.mark.asyncio
     async def test_ensure_stream_exists_updates_subjects(
@@ -85,7 +85,7 @@ class TestNATSEventStore:
 
         # Stream exists with different subjects
         stream_info = MagicMock()
-        stream_info.config.subjects = ["old.events.*"]
+        stream_info.config.subjects = ["old.events.>"]
         mock_jetstream.stream_info.return_value = stream_info
         mock_jetstream.update_stream = AsyncMock()
 

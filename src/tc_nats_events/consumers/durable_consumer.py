@@ -81,7 +81,7 @@ class DurableEventConsumer(BaseEventConsumer):
         # Consumer configuration
         self.stream_name = config.stream_name
         self.consumer_name = f"{service_name}-consumer"
-        self.subject_filter = f"{config.subject_prefix}.*"
+        self.subject_filter = f"{config.subject_prefix}.>"
 
         # State management
         self._consumer_state = ConsumerState.IDLE

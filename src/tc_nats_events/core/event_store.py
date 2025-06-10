@@ -116,12 +116,50 @@ class NATSEventStore:
                 # Ensure stream exists
                 await self._ensure_stream_exists()
 
+                # Wait for stream to be ready
+                await self._wait_for_stream_ready()
+
                 self._is_connected = True
                 logger.info("Connected to NATS successfully")
 
             except Exception as e:
                 logger.error(f"Failed to connect to NATS: {e}")
                 raise ConnectionError(f"NATS connection failed: {e}")
+
+    async def _wait_for_stream_ready(
+        self, max_attempts: int = 10, delay: float = 1.0
+    ) -> None:
+        """
+        Wait for stream to be ready to accept messages.
+
+        Args:
+            max_attempts: Maximum number of attempts to check stream
+            delay: Delay between attempts in seconds
+        """
+        for attempt in range(max_attempts):
+            try:
+                if self._js is None:
+                    raise EventStoreError("JetStream context not initialized")
+
+                # Try to get stream info
+                info = await self._js.stream_info(self.stream_name)
+
+                # Check if stream has proper state
+                if info.state and info.config:
+                    logger.info(f"Stream '{self.stream_name}' is ready")
+                    return
+
+            except Exception as e:
+                logger.warning(
+                    f"Stream not ready yet (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
+
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(delay)
+
+        raise EventStoreError(
+            f"Stream '{self.stream_name}' did not become ready after {max_attempts} attempts"
+        )
 
     async def _ensure_stream_exists(self) -> None:
         """
@@ -144,7 +182,7 @@ class NATSEventStore:
                     if stream_info.config.subjects
                     else set()
                 )
-                expected_subjects = {f"{self.subject_prefix}.*"}
+                expected_subjects = {f"{self.subject_prefix}.>"}
 
                 if current_subjects != expected_subjects:
                     await self._update_stream_config()
@@ -159,9 +197,10 @@ class NATSEventStore:
 
     async def _create_stream(self) -> None:
         """Create new stream with optimized configuration."""
+        # Create stream configuration with proper typing
         config = StreamConfig(
             name=self.stream_name,
-            subjects=[f"{self.subject_prefix}.*"],
+            subjects=[f"{self.subject_prefix}.>"],
             # Persistence configuration for Event Sourcing
             retention=RetentionPolicy.LIMITS,
             storage=StorageType.FILE,  # Persistent storage
@@ -174,11 +213,34 @@ class NATSEventStore:
             duplicate_window=120,  # 2 minutes deduplication
             # Replication for durability (production should use 3+)
             num_replicas=self.config.replicas,
-            # Allow direct access for fast reads
-            allow_direct=True,
-            # Ensure message ordering per subject
-            discard_new_per_subject=False,
         )
+
+        # Try to add optional parameters that might not exist in all versions
+        try:
+            # Test if StreamConfig accepts discard_new_per_subject
+            import inspect
+
+            sig = inspect.signature(StreamConfig.__init__)
+            if "discard_new_per_subject" in sig.parameters:
+                # Recreate config with the additional parameter
+                config = StreamConfig(
+                    name=self.stream_name,
+                    subjects=[f"{self.subject_prefix}.>"],
+                    retention=RetentionPolicy.LIMITS,
+                    storage=StorageType.FILE,
+                    max_msgs=self.config.max_messages,
+                    max_bytes=self.config.max_bytes,
+                    max_age=self.config.max_age_seconds,
+                    max_msg_size=self.config.max_msg_size,
+                    duplicate_window=120,
+                    num_replicas=self.config.replicas,
+                    discard_new_per_subject=False,
+                )
+                logger.debug("Added discard_new_per_subject parameter to stream config")
+        except Exception:
+            logger.debug(
+                "discard_new_per_subject not available in this nats-py version"
+            )
 
         if self._js is None:
             raise EventStoreError("JetStream context not initialized")
@@ -192,7 +254,7 @@ class NATSEventStore:
         stream_info = await self._js.stream_info(self.stream_name)
 
         config = stream_info.config
-        config.subjects = [f"{self.subject_prefix}.*"]
+        config.subjects = [f"{self.subject_prefix}.>"]
 
         if self._js is None:
             raise EventStoreError("JetStream context not initialized")
@@ -241,8 +303,20 @@ class NATSEventStore:
             if self._js is None:
                 raise EventStoreError("JetStream context not initialized")
 
+            # Ensure stream is ready before publishing
+            # This helps prevent "no response from stream" errors
+            try:
+                await self._js.stream_info(self.stream_name)
+            except Exception as e:
+                logger.warning(f"Stream may not be ready: {e}")
+                # Try to recreate the stream connection
+                await self._ensure_stream_exists()
+
             ack = await self._js.publish(
-                subject=subject, payload=event.to_json(), headers=headers, timeout=10
+                subject=subject,
+                payload=event.to_json(),
+                headers=headers,
+                timeout=30.0,  # Increased timeout to 30 seconds
             )
 
             # Record metrics
@@ -348,7 +422,7 @@ class NATSEventStore:
         config = ConsumerConfig(
             name=consumer_name,
             durable_name=consumer_name,
-            filter_subjects=filter_subjects or [f"{self.subject_prefix}.*"],
+            filter_subjects=filter_subjects or [f"{self.subject_prefix}.>"],
             ack_policy=AckPolicy.EXPLICIT,
             replay_policy=ReplayPolicy.INSTANT,
             deliver_policy=DeliverPolicy.ALL,

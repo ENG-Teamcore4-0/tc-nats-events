@@ -187,10 +187,9 @@ class DurableEventConsumer(BaseEventConsumer):
                 await self._js.stream_info(self.stream_name)
                 logger.info(f"Stream '{self.stream_name}' exists")
             except nats.js.errors.NotFoundError:
-                raise ConsumerError(
-                    f"Stream '{self.stream_name}' not found. "
-                    "Please ensure the EventStore is connected and the stream is created."
-                )
+                logger.info(f"Stream '{self.stream_name}' not found, creating it...")
+                await self._create_stream_if_not_exists()
+                logger.info(f"Stream '{self.stream_name}' created successfully")
 
             # Check if consumer exists
             try:
@@ -495,3 +494,25 @@ class DurableEventConsumer(BaseEventConsumer):
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit."""
         await self.stop()
+
+    async def _create_stream_if_not_exists(self) -> None:
+        """Create stream using the same configuration as EventStore."""
+        from nats.js.api import RetentionPolicy, StorageType, StreamConfig
+
+        if self._js is None:
+            raise ConsumerError("JetStream context not initialized")
+
+        config = StreamConfig(
+            name=self.stream_name,
+            subjects=[f"{self.config.subject_prefix}.>"],
+            retention=RetentionPolicy.LIMITS,
+            storage=StorageType.FILE,
+            max_msgs=self.config.max_messages,
+            max_bytes=self.config.max_bytes,
+            max_age=self.config.max_age_seconds,
+            max_msg_size=self.config.max_msg_size,
+            duplicate_window=120,
+            num_replicas=self.config.replicas,
+        )
+
+        await self._js.add_stream(config)

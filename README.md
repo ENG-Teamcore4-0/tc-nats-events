@@ -10,6 +10,17 @@ Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture 
 
 TC NATS Events is a Python package that implements Event Sourcing and Durable Consumer patterns using NATS JetStream. It's designed for building reliable microservices architectures with guaranteed message delivery and automatic synchronization.
 
+### When to Use TC NATS Events
+
+| Use Case | TC NATS Events | Traditional Queue | Database Polling |
+|----------|----------------|-------------------|------------------|
+| Event Sourcing | ✅ Built-in support | ❌ Manual implementation | ❌ Not suitable |
+| Multi-service coordination | ✅ Automatic sync | ⚠️ Manual coordination | ❌ Complex joins |
+| Historical replay | ✅ From any point | ❌ Limited | ❌ Not available |
+| Horizontal scaling | ✅ Automatic | ⚠️ Manual setup | ❌ Lock contention |
+| At-least-once delivery | ✅ Guaranteed | ✅ Available | ❌ Manual tracking |
+| Real-time updates | ✅ < 10ms latency | ✅ Low latency | ❌ Polling delay |
+
 ### Key Features
 
 - **Event Sourcing**: Immutable events with automatic metadata tracking
@@ -205,6 +216,319 @@ async def main():
 asyncio.run(main())
 ```
 
+### 5. Error Handling and Recovery
+
+```python
+from tc_nats_events import DurableEventConsumer, Event
+
+class ResilientService:
+    def __init__(self, consumer: DurableEventConsumer):
+        self.consumer = consumer
+        self.consumer.register_handler("order.created", self.handle_order)
+    
+    async def handle_order(self, event: Event):
+        """Handle order with retry logic."""
+        order_data = event.data
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # Process order
+                await self.process_order(order_data)
+                break
+            except TemporaryError as e:
+                if attempt == max_retries - 1:
+                    # Send to dead letter queue
+                    await self.send_to_dlq(event, str(e))
+                    raise
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+```
+
+### 6. Multi-Service Coordination
+
+```python
+# User Service emits events
+async with EventPublisher("user-service", config) as publisher:
+    await publisher.publish("user.registered", {
+        "user_id": "usr-123",
+        "email": "user@example.com"
+    })
+
+# Multiple services react to the event
+# Email Service
+email_consumer = DurableEventConsumer("email-service", config)
+email_consumer.register_handler("user.registered", send_welcome_email)
+
+# Analytics Service
+analytics_consumer = DurableEventConsumer("analytics-service", config)
+analytics_consumer.register_handler("user.registered", track_registration)
+
+# Billing Service
+billing_consumer = DurableEventConsumer("billing-service", config)
+billing_consumer.register_handler("user.registered", create_billing_account)
+```
+
+### 7. Performance Monitoring
+
+```python
+from tc_nats_events.utils.metrics import get_metrics_collector
+
+# Monitor publisher performance
+metrics = get_metrics_collector("my-service")
+start_time = metrics.record_publish_start()
+
+await publisher.publish("event.type", data)
+
+metrics.record_publish_success(start_time)
+
+# Get performance statistics
+stats = metrics.get_metrics()
+print(f"P95 latency: {stats['publish_stats']['p95_latency_ms']}ms")
+```
+
+### 8. FastAPI Microservice Consumer
+
+```python
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from tc_nats_events import DurableEventConsumer, EventPublisher, NATSConfig, Event
+
+class NotificationService:
+    def __init__(self):
+        self.config = NATSConfig.from_env()
+        self.consumer = DurableEventConsumer("notification-service", self.config)
+        self.publisher = EventPublisher("notification-service", self.config)
+        self.processed_count = 0
+    
+    async def start(self):
+        """Start consuming events in background."""
+        # Register event handlers
+        self.consumer.register_handler("user.registered", self.handle_user_registered)
+        self.consumer.register_handler("order.created", self.handle_order_created)
+        
+        # Connect publisher and start consumer
+        await self.publisher.connect()
+        await self.consumer.start()
+        
+        # Wait for initial sync
+        while not self.consumer.is_synced:
+            await asyncio.sleep(0.5)
+        print("✅ Notification service ready")
+    
+    async def handle_user_registered(self, event: Event):
+        """Process user registration - send welcome email."""
+        user_data = event.data
+        
+        # Send welcome email (simulate)
+        await self._send_email(
+            email=user_data["email"],
+            template="welcome",
+            data={"name": user_data["name"]}
+        )
+        
+        self.processed_count += 1
+        print(f"📧 Welcome email sent to {user_data['email']}")
+    
+    async def handle_order_created(self, event: Event):
+        """Process order creation - send confirmation."""
+        order_data = event.data
+        
+        await self._send_email(
+            email=order_data["customer_email"],
+            template="order_confirmation", 
+            data={
+                "order_id": order_data["order_id"],
+                "total": order_data["total_amount"]
+            }
+        )
+        
+        self.processed_count += 1
+        print(f"📋 Order confirmation sent for {order_data['order_id']}")
+    
+    async def _send_email(self, email: str, template: str, data: dict):
+        """Simulate sending email."""
+        await asyncio.sleep(0.1)  # Simulate API call
+        
+        # Emit notification sent event
+        await self.publisher.publish("notification.email.sent", {
+            "email": email,
+            "template": template,
+            "sent_at": datetime.now(timezone.utc).isoformat()
+        })
+    
+    async def stop(self):
+        await self.consumer.stop()
+        await self.publisher.disconnect()
+
+# FastAPI app with background consumer
+notification_service = NotificationService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await notification_service.start()
+    yield
+    # Shutdown  
+    await notification_service.stop()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "consumer_synced": notification_service.consumer.is_synced,
+        "events_processed": notification_service.processed_count
+    }
+
+@app.get("/stats")  
+async def stats():
+    return {
+        "processed_count": notification_service.processed_count,
+        "consumer_state": notification_service.consumer.state,
+        "sync_status": notification_service.consumer.get_sync_status()
+    }
+
+# Run with: uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+### 9. Complete Microservice Example
+
+```python
+import asyncio
+from datetime import datetime
+from tc_nats_events import (
+    EventPublisher, DurableEventConsumer, NATSConfig,
+    Event, EventMetadata, setup_logging
+)
+
+class OrderService:
+    """Complete order processing microservice."""
+    
+    def __init__(self, config: NATSConfig):
+        self.config = config
+        self.publisher = EventPublisher("order-service", config)
+        self.consumer = DurableEventConsumer("order-service", config)
+        self.orders = {}
+        
+    async def start(self):
+        """Start the service."""
+        # Connect publisher
+        await self.publisher.connect()
+        
+        # Register event handlers
+        self.consumer.register_handler("api.order.requested", self.handle_order_request)
+        self.consumer.register_handler("payment.completed", self.handle_payment_completed)
+        self.consumer.register_handler("inventory.reserved", self.handle_inventory_reserved)
+        
+        # Start consumer
+        await self.consumer.start()
+        
+        # Wait for sync
+        while not self.consumer.is_synced:
+            await asyncio.sleep(0.1)
+            
+        print("✅ Order service ready")
+    
+    async def handle_order_request(self, event: Event):
+        """Process new order request."""
+        order_data = event.data
+        order_id = f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Create order
+        self.orders[order_id] = {
+            **order_data,
+            "order_id": order_id,
+            "status": "pending",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Set correlation context
+        self.publisher.set_context(
+            correlation_id=f"order-{order_id}",
+            user_id=order_data.get("user_id")
+        )
+        
+        # Emit order created event
+        await self.publisher.publish("order.created", self.orders[order_id])
+        
+        # Request payment
+        await self.publisher.publish("payment.requested", {
+            "order_id": order_id,
+            "amount": order_data["total_amount"],
+            "currency": "USD"
+        })
+        
+        # Reserve inventory
+        await self.publisher.publish("inventory.reserve_requested", {
+            "order_id": order_id,
+            "items": order_data["items"]
+        })
+    
+    async def handle_payment_completed(self, event: Event):
+        """Handle successful payment."""
+        order_id = event.data["order_id"]
+        
+        if order_id in self.orders:
+            self.orders[order_id]["payment_status"] = "completed"
+            self.orders[order_id]["payment_id"] = event.data["payment_id"]
+            
+            await self._check_order_completion(order_id)
+    
+    async def handle_inventory_reserved(self, event: Event):
+        """Handle inventory reservation."""
+        order_id = event.data["order_id"]
+        
+        if order_id in self.orders:
+            self.orders[order_id]["inventory_status"] = "reserved"
+            self.orders[order_id]["reservation_id"] = event.data["reservation_id"]
+            
+            await self._check_order_completion(order_id)
+    
+    async def _check_order_completion(self, order_id: str):
+        """Check if order is ready to complete."""
+        order = self.orders.get(order_id)
+        if not order:
+            return
+            
+        # Check if both payment and inventory are ready
+        if (order.get("payment_status") == "completed" and 
+            order.get("inventory_status") == "reserved"):
+            
+            order["status"] = "confirmed"
+            order["confirmed_at"] = datetime.now().isoformat()
+            
+            # Emit order confirmed event
+            await self.publisher.publish("order.confirmed", {
+                "order_id": order_id,
+                "customer_email": order["customer_email"],
+                "items": order["items"],
+                "total_amount": order["total_amount"]
+            })
+    
+    async def stop(self):
+        """Stop the service gracefully."""
+        await self.consumer.stop()
+        await self.publisher.disconnect()
+
+# Run the service
+async def main():
+    setup_logging(level="INFO")
+    config = NATSConfig.from_env()
+    
+    service = OrderService(config)
+    await service.start()
+    
+    # Keep running
+    try:
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        await service.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ## 🏗️ Architecture
 
 ### Event Flow
@@ -392,11 +716,127 @@ setup_logging(
 
 See the [examples/](examples/) directory for complete examples:
 
-- [Basic Publisher/Consumer](examples/basic_pubsub.py)
-- [**Custom Events** - Complete Flexibility](examples/custom_events.py) ⭐
-- [Advanced Features - Metrics & Idempotency](examples/advanced_features.py)
-- [Scraper Integration](examples/scraper_integration.py)
-- [Multi-Service Coordination](examples/multi_service_sync.py)
+### Core Examples
+- [Basic Publisher/Consumer](examples/basic_pubsub.py) - Simple event publishing and consuming
+- [**Custom Events** - Complete Flexibility](examples/custom_events.py) ⭐ - Creating any custom event types
+- [Advanced Features](examples/advanced_features.py) - Metrics, idempotency, and monitoring
+- [**FastAPI Microservice** - Production Ready](examples/fastapi_microservice.py) 🚀 - Complete microservice with FastAPI consuming events
+
+### Integration Patterns
+- [Multi-Service Coordination](examples/multi_service_sync.py) - Coordinating multiple services through events
+- [Real-time Data Synchronization](examples/realtime_data_sync.py) - Keeping services in sync with event sourcing
+- [Scraper Integration](examples/scraper_integration.py) - Event-driven web scraping system
+
+### Production Patterns
+- [Error Handling & Recovery](examples/error_handling_recovery.py) - Robust error handling with circuit breakers
+- [Performance Testing](examples/performance_testing.py) - Load testing and performance measurement
+- [Configuration Patterns](examples/configuration_patterns.py) - Environment configs and deployment strategies
+
+## 💡 Common Patterns
+
+### Event Naming Conventions
+
+```
+service.entity.action
+```
+
+Examples:
+- `user.profile.updated`
+- `payment.transaction.completed`
+- `inventory.stock.depleted`
+- `notification.email.sent`
+
+### Idempotency Pattern
+
+```python
+from tc_nats_events.utils.idempotency import generate_deterministic_id
+
+# Generate deterministic ID for idempotent processing
+event_id = generate_deterministic_id(
+    data={"order_id": "123", "amount": 99.99},
+    fields=["order_id", "amount"]  # Fields that make event unique
+)
+
+await publisher.publish("order.created", {
+    "id": event_id,
+    "order_id": "123",
+    "amount": 99.99
+})
+```
+
+### Event Correlation
+
+```python
+# Set correlation context for related events
+publisher.set_context(
+    correlation_id="order-flow-123",
+    user_id="user-456"
+)
+
+# All subsequent events will have this context
+await publisher.publish("order.created", order_data)
+await publisher.publish("payment.initiated", payment_data)
+await publisher.publish("inventory.reserved", inventory_data)
+```
+
+### Circuit Breaker Pattern
+
+```python
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=60):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "closed"  # closed, open, half-open
+    
+    async def call(self, func, *args, **kwargs):
+        if self.state == "open":
+            if self._should_attempt_reset():
+                self.state = "half-open"
+            else:
+                raise Exception("Circuit breaker is open")
+        
+        try:
+            result = await func(*args, **kwargs)
+            self._on_success()
+            return result
+        except Exception as e:
+            self._on_failure()
+            raise
+```
+
+## 🎯 Best Practices
+
+### 1. Event Design
+- Keep events immutable and self-contained
+- Include all necessary data in the event
+- Use past tense for event names (e.g., `order.created` not `order.create`)
+- Version your events when making breaking changes
+
+### 2. Error Handling
+- Implement retry logic with exponential backoff
+- Use dead letter queues for permanent failures
+- Set appropriate ACK timeouts based on processing time
+- Monitor and alert on high failure rates
+
+### 3. Performance
+- Batch operations when possible
+- Use connection pooling
+- Monitor consumer lag and scale accordingly
+- Set appropriate max_ack_pending based on throughput
+
+### 4. Security
+- Use TLS for NATS connections in production
+- Implement proper authentication and authorization
+- Never include sensitive data in events
+- Use credentials files for NATS authentication
+
+### 5. Monitoring
+- Track event processing metrics (latency, throughput, errors)
+- Set up alerts for consumer lag
+- Monitor stream size and retention
+- Use correlation IDs for distributed tracing
 
 ## 🎯 Custom Events Documentation
 
@@ -407,6 +847,69 @@ See the [examples/](examples/) directory for complete examples:
 - Real-world service examples
 - Event evolution and versioning
 - Multi-service coordination
+
+## 🔧 Troubleshooting
+
+### Common Issues
+
+#### Consumer not receiving events
+```python
+# Check if consumer is synced
+if not consumer.is_synced:
+    status = consumer.get_sync_status()
+    print(f"Still syncing: {status['events_processed']} events processed")
+
+# Ensure handler is registered before starting
+consumer.register_handler("event.type", handler_function)
+await consumer.start()  # Start AFTER registering handlers
+```
+
+#### Connection failures
+```python
+# Use multiple servers for redundancy
+config = NATSConfig(
+    servers=[
+        "nats://nats-1:4222",
+        "nats://nats-2:4222",
+        "nats://nats-3:4222"
+    ]
+)
+
+# Enable reconnection with backoff
+config.reconnect_time_wait = 2  # seconds
+config.max_reconnect_attempts = 60
+```
+
+#### High memory usage
+```python
+# Limit pending messages
+config = NATSConfig(
+    max_ack_pending=100,  # Limit concurrent processing
+    max_messages=1_000_000  # Limit stream size
+)
+
+# Process events in batches
+async def handle_batch(events: List[Event]):
+    # Process events in chunks
+    for chunk in chunks(events, 100):
+        await process_chunk(chunk)
+```
+
+#### Duplicate event processing
+```python
+from tc_nats_events.utils.idempotency import get_idempotent_processor
+
+processor = get_idempotent_processor()
+
+async def handle_event(event: Event):
+    # Process with idempotency guarantee
+    result = await processor.process_with_idempotency(
+        event_id=event.metadata.event_id,
+        handler_name="my_handler",
+        handler_func=actual_processing_function,
+        event
+    )
+```
 
 ## 🤝 Contributing
 

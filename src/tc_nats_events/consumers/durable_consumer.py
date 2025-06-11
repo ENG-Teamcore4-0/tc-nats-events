@@ -57,6 +57,8 @@ class DurableEventConsumer(BaseEventConsumer):
         config: NATSConfig,
         batch_size: int = 10,
         fetch_timeout: float = 2.0,
+        adapters: Optional[List] = None,
+        auto_adapt: bool = True,
     ):
         """
         Initialize durable event consumer.
@@ -66,12 +68,26 @@ class DurableEventConsumer(BaseEventConsumer):
             config: NATS configuration
             batch_size: Number of messages to fetch per batch
             fetch_timeout: Timeout for fetch operations in seconds
+            adapters: List of EventAdapter instances for handling different event formats
+            auto_adapt: If True, automatically adds FlexibleAdapter to handle any format
         """
         super().__init__(service_name)
 
         self.config = config
         self.batch_size = batch_size
         self.fetch_timeout = fetch_timeout
+
+        # Setup adapters with auto-adaptation
+        self.adapters = adapters or []
+        if auto_adapt:
+            # Import here to avoid circular imports
+            from ..adapters.generic_adapter import FlexibleAdapter
+
+            # Add FlexibleAdapter as fallback if not already present
+            if not any(
+                isinstance(adapter, FlexibleAdapter) for adapter in self.adapters
+            ):
+                self.adapters.append(FlexibleAdapter())
 
         # NATS components
         self._nc: Optional[NATS] = None
@@ -326,8 +342,8 @@ class DurableEventConsumer(BaseEventConsumer):
         start_time = self._metrics.record_consume_start()
 
         try:
-            # Parse event
-            event = Event.from_json(msg.data)
+            # Parse event with adapters
+            event = Event.from_json(msg.data, adapters=self.adapters)
 
             # Add sequence from NATS
             event = event.with_sequence(msg.metadata.sequence.stream)

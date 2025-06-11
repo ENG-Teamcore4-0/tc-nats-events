@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nats
 import pytest
 
+from tc_nats_events.adapters import FlexibleAdapter, GenericAdapter
 from tc_nats_events.consumers.durable_consumer import (
     ConsumerState,
     DurableEventConsumer,
@@ -31,6 +32,7 @@ class TestDurableEventConsumer:
             config=nats_config,
             batch_size=5,
             fetch_timeout=1.0,
+            auto_adapt=False,  # Disable auto-adaptation for tests
         )
         yield consumer
         # Clean up handlers and state between tests
@@ -355,3 +357,50 @@ class TestDurableEventConsumer:
         assert metrics["last_processed_sequence"] == 50
         assert metrics["state_size"] == 0
         assert set(metrics["registered_handlers"]) == {"test.created", "test.updated"}
+
+    def test_consumer_with_adapters(self, nats_config):
+        """Test consumer initialization with adapters."""
+        adapter = GenericAdapter()
+        consumer = DurableEventConsumer(
+            service_name="test-service",
+            config=nats_config,
+            adapters=[adapter],
+            auto_adapt=False,
+        )
+
+        assert len(consumer.adapters) == 1
+        assert isinstance(consumer.adapters[0], GenericAdapter)
+
+    def test_consumer_with_auto_adapt(self, nats_config):
+        """Test consumer initialization with auto-adaptation enabled."""
+        consumer = DurableEventConsumer(
+            service_name="test-service", config=nats_config, auto_adapt=True
+        )
+
+        # Should automatically include FlexibleAdapter
+        assert len(consumer.adapters) == 1
+        assert isinstance(consumer.adapters[0], FlexibleAdapter)
+
+    def test_consumer_with_custom_adapters_and_auto_adapt(self, nats_config):
+        """Test consumer with custom adapters and auto-adaptation."""
+        custom_adapter = GenericAdapter()
+        consumer = DurableEventConsumer(
+            service_name="test-service",
+            config=nats_config,
+            adapters=[custom_adapter],
+            auto_adapt=True,
+        )
+
+        # Should have custom adapter plus FlexibleAdapter
+        assert len(consumer.adapters) == 2
+        assert isinstance(consumer.adapters[0], GenericAdapter)
+        assert isinstance(consumer.adapters[1], FlexibleAdapter)
+
+    def test_consumer_auto_adapt_disabled(self, nats_config):
+        """Test consumer with auto-adaptation disabled."""
+        consumer = DurableEventConsumer(
+            service_name="test-service", config=nats_config, auto_adapt=False
+        )
+
+        # Should have no adapters when auto_adapt=False and no adapters provided
+        assert len(consumer.adapters) == 0

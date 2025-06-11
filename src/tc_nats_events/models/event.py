@@ -10,7 +10,10 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from ..adapters.base_adapter import EventAdapter
 
 
 class EventType(str, Enum):
@@ -122,12 +125,44 @@ class Event:
         return json.dumps(event_dict, separators=(",", ":")).encode("utf-8")
 
     @classmethod
-    def from_json(cls, json_data: bytes) -> "Event":
+    def _try_adapters(
+        cls, json_data: bytes, adapters: List["EventAdapter"]
+    ) -> Optional["Event"]:
+        """Try to deserialize using provided adapters."""
+        for adapter in adapters:
+            try:
+                if adapter.can_handle(json_data):
+                    return adapter.adapt_to_event(json_data)
+            except Exception:
+                # Continue to next adapter if this one fails
+                continue
+        return None
+
+    @classmethod
+    def _validate_required_fields(cls, data: dict) -> None:
+        """Validate that required fields are present."""
+        required_fields = ["event_type", "data", "timestamp"]
+        missing_fields = [f for f in required_fields if f not in data]
+        if missing_fields:
+            raise ValueError(f"Missing required fields: {missing_fields}")
+
+    @classmethod
+    def _build_metadata(cls, data: dict) -> Optional[EventMetadata]:
+        """Build metadata object if present in data."""
+        if "metadata" in data and data["metadata"]:
+            return EventMetadata(**data["metadata"])
+        return None
+
+    @classmethod
+    def from_json(
+        cls, json_data: bytes, adapters: Optional[List["EventAdapter"]] = None
+    ) -> "Event":
         """
-        Deserialize event from JSON bytes.
+        Deserialize event from JSON bytes with optional format adapters.
 
         Args:
             json_data: UTF-8 encoded JSON bytes
+            adapters: List of EventAdapter instances for handling different formats
 
         Returns:
             Event instance
@@ -135,19 +170,17 @@ class Event:
         Raises:
             ValueError: If JSON is invalid or missing required fields
         """
+        # Try adapters first if provided
+        if adapters:
+            result = cls._try_adapters(json_data, adapters)
+            if result:
+                return result
+
+        # Fall back to standard tc-nats-events format
         try:
             data = json.loads(json_data.decode("utf-8"))
-
-            # Validate required fields
-            required_fields = ["event_type", "data", "timestamp"]
-            missing_fields = [f for f in required_fields if f not in data]
-            if missing_fields:
-                raise ValueError(f"Missing required fields: {missing_fields}")
-
-            # Reconstruct metadata if present
-            metadata = None
-            if "metadata" in data and data["metadata"]:
-                metadata = EventMetadata(**data["metadata"])
+            cls._validate_required_fields(data)
+            metadata = cls._build_metadata(data)
 
             return cls(
                 event_type=data["event_type"],

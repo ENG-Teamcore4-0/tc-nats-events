@@ -17,6 +17,7 @@ Main features:
 __version__ = "0.1.0"
 __author__ = "TeamCore Platform Team"
 
+from .adapters import EventAdapter, FlexibleAdapter, GenericAdapter
 from .consumers.durable_consumer import DurableEventConsumer
 from .core.event_store import NATSEventStore
 from .models.event import Event, EventMetadata, EventType, create_event
@@ -30,6 +31,10 @@ __all__ = [
     "EventMetadata",
     "EventType",
     "create_event",
+    # Adapters
+    "EventAdapter",
+    "GenericAdapter",
+    "FlexibleAdapter",
     # Core
     "NATSEventStore",
     # Consumers

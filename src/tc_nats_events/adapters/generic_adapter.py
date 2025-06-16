@@ -92,10 +92,21 @@ class GenericAdapter(EventAdapter):
 
     def can_handle(self, raw_data: bytes) -> bool:
         """
-        Generic adapter can handle any valid JSON.
+        Generic adapter can handle valid JSON that's not already in tc-nats-events format.
         """
         try:
-            json.loads(raw_data.decode("utf-8"))
+            data = json.loads(raw_data.decode("utf-8"))
+
+            # Check if this is already in standard tc-nats-events format
+            # Standard format has: event_type, data, timestamp (and maybe metadata)
+            has_event_type = "event_type" in data
+            has_data = "data" in data
+            has_timestamp = "timestamp" in data
+
+            # If it looks like standard format, don't handle it
+            if has_event_type and has_data and has_timestamp:
+                return False
+
             return True
         except (json.JSONDecodeError, UnicodeDecodeError):
             return False
@@ -128,13 +139,16 @@ class GenericAdapter(EventAdapter):
         except Exception as e:
             logger.error(f"Failed to adapt generic event: {e}")
             # Create error event with original data
+            try:
+                original_data = json.loads(raw_data.decode("utf-8", errors="replace"))
+            except Exception:
+                original_data = raw_data.decode("utf-8", errors="replace")
+
             return self._create_safe_event(
                 event_type="generic.adapter.error",
                 data={
                     "error": str(e),
-                    "original_data": json.loads(
-                        raw_data.decode("utf-8", errors="replace")
-                    ),
+                    "original_data": original_data,
                 },
             )
 
@@ -192,7 +206,10 @@ class GenericAdapter(EventAdapter):
                 try:
                     decoded = json.loads(data)
                     data = decoded
-                except json.JSONDecodeError:
+                    # If decoded to non-string, stop trying
+                    if not isinstance(data, str):
+                        break
+                except (json.JSONDecodeError, TypeError):
                     break
 
         return data

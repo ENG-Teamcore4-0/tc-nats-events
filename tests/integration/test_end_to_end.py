@@ -38,11 +38,14 @@ class TestEndToEnd:
 
     @pytest.fixture
     async def config(self):
-        """Create test configuration."""
+        """Create test configuration with unique identifiers."""
+        import uuid
+
+        unique_id = str(uuid.uuid4())[:8]
         return NATSConfig(
             servers=[NATS_URL],
-            stream_name="test-integration-events",
-            subject_prefix="test.integration",
+            stream_name=f"test-integration-events-{unique_id}",
+            subject_prefix=f"test.integration.{unique_id}",
             max_messages=1000,
             max_age_seconds=300,  # 5 minutes for tests
         )
@@ -103,9 +106,15 @@ class TestEndToEnd:
             # Start consumer
             await consumer.start()
 
-            # Wait for initial sync
+            # Wait for initial sync with timeout
+            import time
+
+            timeout = 2.0
+            sync_start = time.time()
             while not consumer.is_synced:
-                await asyncio.sleep(0.1)
+                if time.time() - sync_start > timeout:
+                    break
+                await asyncio.sleep(0.02)
 
             # Connect publisher
             await publisher.connect()
@@ -118,7 +127,7 @@ class TestEndToEnd:
                 )
 
             # Wait for consumption
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
             # Verify
             assert len(consumed_events) == 5
@@ -132,6 +141,8 @@ class TestEndToEnd:
 
     @pytest.mark.asyncio
     async def test_durable_consumer_recovery(self, config, cleanup_stream):
+        import time
+
         """Test that durable consumer recovers from where it left off."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
@@ -161,11 +172,15 @@ class TestEndToEnd:
             await consumer1.start()
 
             # Wait for sync and processing of all events
+            timeout = 2.0
+            sync_start = time.time()
             while not consumer1.is_synced:
-                await asyncio.sleep(0.1)
+                if time.time() - sync_start > timeout:
+                    break
+                await asyncio.sleep(0.02)
 
             # Give time to process all events
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
             await consumer1.stop()
 
@@ -181,11 +196,15 @@ class TestEndToEnd:
             await consumer2.start()
 
             # Wait for sync
+            timeout = 2.0
+            sync_start = time.time()
             while not consumer2.is_synced:
-                await asyncio.sleep(0.1)
+                if time.time() - sync_start > timeout:
+                    break
+                await asyncio.sleep(0.02)
 
             # Give some time for processing after sync
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
             await consumer2.stop()
 
@@ -203,6 +222,8 @@ class TestEndToEnd:
 
     @pytest.mark.asyncio
     async def test_multiple_consumers_load_balancing(self, config, cleanup_stream):
+        import time
+
         """Test load balancing between multiple consumers."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
@@ -233,8 +254,12 @@ class TestEndToEnd:
             await consumer2.start()
 
             # Wait for sync
+            timeout = 2.0
+            sync_start = time.time()
             while not (consumer1.is_synced and consumer2.is_synced):
-                await asyncio.sleep(0.1)
+                if time.time() - sync_start > timeout:
+                    break
+                await asyncio.sleep(0.02)
 
             # Publish events
             publisher = EventPublisher("test-publisher", config)
@@ -244,7 +269,7 @@ class TestEndToEnd:
                 await publisher.publish(event_type="balanced", data={"id": i})
 
             # Wait for processing
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
 
             # Verify load was distributed
             assert len(consumer1_events) > 0
@@ -264,6 +289,8 @@ class TestEndToEnd:
 
     @pytest.mark.asyncio
     async def test_event_ordering(self, config, cleanup_stream):
+        import time
+
         """Test that events are processed in order."""
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
@@ -283,8 +310,12 @@ class TestEndToEnd:
             await consumer.start()
 
             # Wait for sync
+            timeout = 2.0
+            sync_start = time.time()
             while not consumer.is_synced:
-                await asyncio.sleep(0.1)
+                if time.time() - sync_start > timeout:
+                    break
+                await asyncio.sleep(0.02)
 
             # Publish events in order
             publisher = EventPublisher("test-publisher", config)
@@ -294,7 +325,7 @@ class TestEndToEnd:
                 await publisher.publish(event_type="ordered", data={"sequence": i})
 
             # Wait for processing
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
 
             # Verify order
             assert received_sequences == list(range(10))
@@ -350,7 +381,7 @@ class TestEndToEnd:
             await publisher.publish(event_type="retry", data={"id": "retry-1"})
 
             # Wait for retries and processing
-            await asyncio.sleep(5)
+            await asyncio.sleep(1.5)
 
             # Verify event was processed (even if only once due to idempotency)
             # The fact that we see multiple errors in logs shows retry is working at NATS level

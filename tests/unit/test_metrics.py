@@ -190,7 +190,7 @@ class TestMetricsCollector:
         assert isinstance(start_time, float)
 
         # Simulate some processing time
-        time.sleep(0.01)
+        time.sleep(0.001)
 
         collector.record_publish_success(start_time)
 
@@ -203,7 +203,7 @@ class TestMetricsCollector:
         collector = MetricsCollector("test-service")
 
         start_time = collector.record_consume_start()
-        time.sleep(0.01)
+        time.sleep(0.001)
         collector.record_consume_success(start_time)
 
         metrics = collector.get_metrics()

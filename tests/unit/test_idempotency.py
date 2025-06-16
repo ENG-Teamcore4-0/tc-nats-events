@@ -239,7 +239,7 @@ class TestIdempotentEventProcessor:
         async def async_handler():
             nonlocal call_count
             call_count += 1
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
             return "async_result"
 
         result = await processor.process_with_idempotency(

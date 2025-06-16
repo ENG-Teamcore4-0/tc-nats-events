@@ -70,7 +70,7 @@ class TestDurableEventConsumer:
 
             # Mock empty fetch to trigger sync completion with small delay
             async def mock_fetch(*args, **kwargs):
-                await asyncio.sleep(0.01)  # Small delay to prevent tight loop
+                await asyncio.sleep(0.001)  # Small delay to prevent tight loop
                 return []
 
             mock_subscription.fetch = mock_fetch
@@ -81,7 +81,7 @@ class TestDurableEventConsumer:
             assert consumer._processing_task is not None
 
             # Wait a bit for processing loop to start and change state
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.001)
             assert consumer.state in [ConsumerState.SYNCING, ConsumerState.LIVE]
 
             # Stop the consumer
@@ -165,7 +165,7 @@ class TestDurableEventConsumer:
             if call_count == 1:
                 return [mock_nats_message]
             else:
-                await asyncio.sleep(0.01)  # Small delay to prevent tight loop
+                await asyncio.sleep(0.001)  # Small delay to prevent tight loop
                 return []
 
         mock_subscription.fetch = mock_fetch
@@ -182,7 +182,7 @@ class TestDurableEventConsumer:
 
         # Run processing loop briefly
         task = asyncio.create_task(consumer._event_processing_loop())
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.01)
         consumer._is_running = False
         await task
 
@@ -245,7 +245,7 @@ class TestDurableEventConsumer:
 
         async def async_handler(evt: Event):
             nonlocal handler_called
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
             handler_called = True
 
         consumer.register_handler("test.async", async_handler)

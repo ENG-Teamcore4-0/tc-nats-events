@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tc-nats-events"
-version = "0.1.7"
+version = "0.2.0"
 description = "Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -41,7 +41,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "nats-py>=2.6.0",
+    "nats-py>=2.10.0",
     "pyyaml>=6.0",
 ]
 
@@ -102,6 +102,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "cluster: requires a 3-node JetStream cluster (NATS_CLUSTER_URL)",
 ]
 
 [tool.coverage.run]
@@ -109,6 +110,7 @@ source = ["src/tc_nats_events"]
 branch = true
 
 [tool.coverage.report]
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

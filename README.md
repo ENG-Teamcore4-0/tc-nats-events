@@ -24,14 +24,14 @@ TC NATS Events is a Python package that implements Event Sourcing and Durable Co
 ### Key Features
 
 - **Event Sourcing**: Immutable events with automatic metadata tracking
-- **Durable Consumers**: Automatic synchronization from event #1 with recovery
-- **At-least-once delivery**: Guaranteed message delivery with explicit acknowledgments
+- **Durable Consumers**: Shared pull consumers with configurable start point (`deliver_policy`) and self-healing loop
+- **At-least-once delivery**: Explicit ack after the handler succeeds, retries with delays, dead letter queue instead of silent drops
 - **Horizontal scaling**: Multiple consumer instances with automatic load balancing
 - **Automatic recovery**: Resilient connection handling and retry logic
 - **Structured logging**: JSON-formatted logs with correlation tracking
 - **Type safety**: Full type hints and validation
 - **⭐ Complete Flexibility**: Use **any string** as event type - no restrictions!
-- **Idempotency**: Built-in duplicate event handling
+- **Idempotency**: Publish dedupe via `Nats-Msg-Id` plus a consumer-side store shared by all replicas (NATS KV) — see [Delivery Guarantees](#-delivery-guarantees)
 - **Rich Metrics**: Real-time performance monitoring with P95/P99 latencies
 
 ## 📦 Installation
@@ -132,7 +132,8 @@ async def main():
     # Register event handlers
     consumer.register_handler("user.created", handle_user_created)
     
-    # Start consumer (automatically syncs from event #1)
+    # Start consumer. A NEW durable starts at deliver_policy="new" (only events
+    # published from now on); use NATSConfig(deliver_policy="all") to replay history.
     async with consumer:
         print(f"Consumer started, syncing: {consumer.is_synced}")
         
@@ -547,6 +548,90 @@ Publisher → NATS JetStream → Durable Consumers
 3. **Durable Consumer**: Automatic synchronization and recovery
 4. **Event Models**: Immutable events with metadata
 
+## ✅ Delivery Guarantees
+
+Requires **nats-server >= 2.10** and **nats-py >= 2.10**.
+
+| Concern | What the library does | Bounded by |
+|---|---|---|
+| Publish retried after a lost PubAck | Every publish carries `Nats-Msg-Id = event_id`; JetStream drops the duplicate and returns the original sequence | `duplicate_window_seconds` (the publisher refuses to connect if its retry horizon exceeds the stream window) |
+| Handler fails (dependency down) | `nak(delay)` with `nak_delays_seconds` (default 1s, 5s, 30s, 2m, 10m); failures are **never cached** | `max_deliver_attempts` (default 6) |
+| Retries exhausted / unparseable message / `NonRetryableError` | Copied to `<stream>-DLQ` (subject `dlq.<prefix>.<consumer>.<type>`) with `X-Dlq-*` headers, then `term()` | DLQ stream retention (`max_age_seconds`) |
+| Pod crashed on the last delivery | `MAX_DELIVERIES` advisory feeds the same DLQ (same `Nats-Msg-Id`, no duplicates) | a replica must be subscribed when the advisory fires |
+| Redelivery after a lost ack, other replica or restart | Shared idempotency store (NATS KV bucket `<stream>-idem`) skips work that already succeeded | `idempotency_ttl_seconds` (default 24h) |
+| Handler slower than `ack_wait` | `in_progress()` heartbeats for the running message and the rest of its batch; `handler_timeout_seconds` caps a hung handler | `handler_timeout_seconds` (default 25s) |
+| Loop keeps failing (e.g. NATS flapping) | Supervisor restarts it with capped backoff; `consumer.health()` / `consumer.is_healthy` for readiness probes | — |
+
+Handler side effects are **effectively-once** within the idempotency TTL: a handler
+can still run twice if its lease is taken over (it hung past the lease) — keep
+handlers idempotent for such edge cases. Mark permanent failures explicitly:
+
+```python
+from tc_nats_events import NonRetryableError
+
+async def handle_order(event):
+    if "order_id" not in event.data:
+        raise NonRetryableError("order_id missing")  # straight to the DLQ
+    await notifications.send(event.data)             # other errors are retried
+```
+
+Publish a deterministic id so re-publishing the same business fact is deduplicated:
+
+```python
+from tc_nats_events import EventMetadata
+from tc_nats_events.utils.idempotency import generate_deterministic_id
+
+event_id = generate_deterministic_id({"order_id": "123"}, fields=["order_id"])
+await publisher.publish("order.created", {"order_id": "123"},
+                        metadata=EventMetadata(event_id=event_id))
+```
+
+### Readiness
+
+```python
+@app.get("/ready")
+async def ready():
+    health = consumer.health()  # {"state", "healthy", "restarts", "last_fetch_ok_at", "last_error"}
+    return JSONResponse(health, status_code=200 if health["healthy"] else 503)
+```
+
+### Trust model and limits
+
+- **Producers are trusted for ids.** JetStream deduplicates `Nats-Msg-Id` stream-wide
+  inside `duplicate_window`, and the consumer key is `(durable, subject, id)`. A producer
+  that reuses another producer's id on the same subject suppresses that event. Give each
+  producer publish rights only on its own subjects and use one account per trust domain.
+  Ids longer than 256 characters or non-printable fall back to the stream sequence.
+- **Clocks.** Leases compare wall-clock time across replicas (tolerance
+  `clock_skew_seconds`, default 2s): keep NTP on every node.
+- **DLQ contents.** The DLQ keeps the full payload plus a short error summary
+  (`X-Dlq-Error`, ≤200 chars). Give it the same ACL and retention as the source stream.
+  It is bounded by `dlq_max_bytes` / `dlq_max_messages` (oldest discarded).
+- **Advisories** are only accepted for this stream/consumer and are ignored when the
+  idempotency store shows the message as done or in progress. Deny publish on
+  `$JS.EVENT.ADVISORY.>` to application users.
+
+### Required NATS permissions
+
+Replace `<S>` (stream), `<C>` (durable, `<service>-consumer`), `<B>` (`<S>-idem`).
+
+**Producer**: publish `<prefix>.<own subtree>.>`, `$JS.API.STREAM.INFO.<S>`; subscribe `_INBOX.>`.
+
+**Consumer (each replica)**:
+
+- Stream / consumer: `$JS.API.INFO`, `$JS.API.STREAM.INFO.<S>`, `$JS.API.STREAM.MSG.GET.<S>`,
+  `$JS.API.CONSUMER.INFO.<S>.<C>`, `$JS.API.CONSUMER.CREATE.<S>.<C>.>`, `$JS.API.CONSUMER.MSG.NEXT.<S>.<C>`,
+  `$JS.ACK.<S>.<C>.>`; subscribe `_INBOX.>`.
+- Idempotency KV: publish `$KV.<B>.>`, `$JS.API.STREAM.INFO.KV_<B>`, `$JS.API.DIRECT.GET.KV_<B>.>`
+  (`$JS.API.STREAM.MSG.GET.KV_<B>` if direct get is off).
+- DLQ: publish `dlq.<prefix>.>`, `$JS.API.STREAM.INFO.<S>-DLQ`.
+- Advisory: subscribe `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<S>.<C>` only.
+- Only if the library bootstraps resources (otherwise pre-provision with IaC):
+  `$JS.API.STREAM.CREATE.<S>`, `$JS.API.STREAM.CREATE.<S>-DLQ`, `$JS.API.STREAM.CREATE.KV_<B>`.
+- Deny `$JS.API.STREAM.DELETE.>` / `$JS.API.STREAM.PURGE.>`; use TLS in production.
+
+Use `idempotency_backend="memory"` / `dlq_enabled=False` only for local development.
+
 ## 🔍 Configuration
 
 ### Environment Variables
@@ -563,10 +648,22 @@ export NATS_SUBJECT_PREFIX="app.events"
 export NATS_MAX_MESSAGES="1000000"
 export NATS_MAX_AGE_SECONDS="2592000"  # 30 days
 
+export NATS_REPLICAS="3"                 # required when NATS_ENVIRONMENT=production
+export NATS_ENVIRONMENT="production"    # development | staging | production
+export NATS_DUPLICATE_WINDOW_SECONDS="120"
+export NATS_ALLOW_STREAM_UPDATE="false" # never rewrite an existing (shared) stream
+
 # Consumer Settings
-export NATS_MAX_DELIVER_ATTEMPTS="3"
+export NATS_DELIVER_POLICY="new"        # new | all | by_start_time | last_per_subject
+export NATS_OPT_START_TIME=""           # ISO-8601, for by_start_time
+export NATS_MAX_DELIVER_ATTEMPTS="6"
+export NATS_NAK_DELAYS_SECONDS="1,5,30,120,600"
 export NATS_ACK_WAIT_SECONDS="30"
+export NATS_HANDLER_TIMEOUT_SECONDS="25"
 export NATS_MAX_ACK_PENDING="1000"
+export NATS_IDEMPOTENCY_BACKEND="nats_kv"   # nats_kv | memory
+export NATS_IDEMPOTENCY_TTL_SECONDS="86400"
+export NATS_DLQ_ENABLED="true"
 ```
 
 ### Programmatic Configuration
@@ -644,9 +741,12 @@ Run the test suite:
 # Unit tests
 pytest tests/unit -v
 
-# Integration tests (requires NATS server)
-docker run -d -p 4222:4222 nats:latest -js
-pytest tests/integration -v
+# Integration + audit regression tests (requires NATS server >= 2.10)
+docker run -d -p 4222:4222 nats:2.10-alpine -js
+pytest tests/integration tests/audit -v
+
+# R3 cluster tests (3-node docker compose)
+make test-cluster
 
 # All tests with coverage
 pytest --cov=tc_nats_events --cov-report=html
@@ -656,10 +756,12 @@ pytest --cov=tc_nats_events --cov-report=html
 
 ### 1. Stream Replication
 
-For production, use at least 3 replicas:
+`NATSConfig.validate()` rejects fewer than 3 replicas when `environment="production"`.
+The idempotency KV bucket and the DLQ stream inherit `replicas`.
 
 ```python
 config = NATSConfig(
+    environment="production",
     replicas=3,
     max_messages=10_000_000,
     max_bytes=10 * 1024 * 1024 * 1024  # 10GB
@@ -681,21 +783,10 @@ consumer3 = DurableEventConsumer("order-processor", config)
 
 ### 3. Error Handling
 
-```python
-async def handle_with_retry(event: Event):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Process event
-            await process_order(event.data)
-            break
-        except TemporaryError as e:
-            if attempt == max_retries - 1:
-                # Send to dead letter queue
-                await dead_letter_queue.publish(event)
-                raise
-            await asyncio.sleep(2 ** attempt)
-```
+Do not retry inside handlers: raise and let the consumer retry with
+`nak_delays_seconds`, then dead-letter after `max_deliver_attempts`.
+Raise `NonRetryableError` for failures that can never succeed. Inspect the DLQ with
+`nats stream view <stream>-DLQ` and replay by re-publishing the payload.
 
 ### 4. Monitoring and Alerting
 
@@ -757,11 +848,12 @@ event_id = generate_deterministic_id(
     fields=["order_id", "amount"]  # Fields that make event unique
 )
 
-await publisher.publish("order.created", {
-    "id": event_id,
-    "order_id": "123",
-    "amount": 99.99
-})
+# The id must travel in the metadata: JetStream dedupes on it (Nats-Msg-Id)
+await publisher.publish(
+    "order.created",
+    {"order_id": "123", "amount": 99.99},
+    metadata=EventMetadata(event_id=event_id),
+)
 ```
 
 ### Event Correlation
@@ -896,20 +988,13 @@ async def handle_batch(events: List[Event]):
 ```
 
 #### Duplicate event processing
-```python
-from tc_nats_events.utils.idempotency import get_idempotent_processor
+`DurableEventConsumer` already deduplicates across replicas and restarts with the
+NATS KV store (`idempotency_backend="nats_kv"`). If duplicates still appear, check:
 
-processor = get_idempotent_processor()
-
-async def handle_event(event: Event):
-    # Process with idempotency guarantee
-    result = await processor.process_with_idempotency(
-        event_id=event.metadata.event_id,
-        handler_name="my_handler",
-        handler_func=actual_processing_function,
-        event
-    )
-```
+- the producer sends a stable id (`Nats-Msg-Id` or our `event-id` header); otherwise the
+  stream sequence is used, which cannot dedupe re-published copies;
+- `idempotency_ttl_seconds` covers your redelivery/replay horizon;
+- the logs for `lease_lost` (a handler exceeded its lease and ran twice).
 
 ## 🤝 Contributing
 

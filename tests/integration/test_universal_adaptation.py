@@ -18,6 +18,7 @@ from tc_nats_events import (
     GenericAdapter,
     NATSConfig,
 )
+from tests.conftest import delete_config_streams
 
 
 @pytest.mark.integration
@@ -36,41 +37,23 @@ class TestUniversalAdaptation:
         """Create test configuration with cleanup."""
         import uuid
 
-        import nats
-
         unique_id = str(uuid.uuid4())[:8]
 
         config = NATSConfig(
             servers=["nats://localhost:4222"],
             stream_name=f"univ-adapt-test-{unique_id}",
             subject_prefix=f"univ.adapt.test.{unique_id}",
+            # Events are published before the durable exists: replay them
+            # (the library default is "new", which would skip them).
+            deliver_policy="all",
         )
 
-        # Clean up any existing stream with the same name
-        try:
-            nc = await nats.connect(servers=config.servers)
-            js = nc.jetstream()
-            try:
-                await js.delete_stream(config.stream_name)
-            except Exception:
-                pass  # Stream doesn't exist, that's fine
-            await nc.close()
-        except Exception:
-            pass  # Connection failed, that's fine for tests
+        # Clean up any existing streams (event, DLQ and idempotency KV)
+        await delete_config_streams(config)
 
         yield config
 
-        # Cleanup after test
-        try:
-            nc = await nats.connect(servers=config.servers)
-            js = nc.jetstream()
-            try:
-                await js.delete_stream(config.stream_name)
-            except Exception:
-                pass  # Stream might not exist
-            await nc.close()
-        except Exception:
-            pass  # Connection failed, that's fine
+        await delete_config_streams(config)
 
     async def publish_different_formats(self, config: NATSConfig):
         """Publish events in different formats using raw NATS."""

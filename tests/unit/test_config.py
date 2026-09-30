@@ -39,9 +39,23 @@ class TestNATSConfig:
         assert config.max_msg_size == 1024 * 1024
         assert config.replicas == 1
 
-        assert config.max_deliver_attempts == 3
+        assert config.max_deliver_attempts == 6
         assert config.ack_wait_seconds == 30
         assert config.max_ack_pending == 1000
+
+        # Reliability defaults (0.2.0)
+        assert config.environment == "development"
+        assert config.deliver_policy == "new"
+        assert config.opt_start_time is None
+        assert config.nak_delays_seconds == (1.0, 5.0, 30.0, 120.0, 600.0)
+        assert config.consumer_backoff_seconds is None
+        assert config.idempotency_backend == "nats_kv"
+        assert config.dlq_enabled is True
+        assert config.allow_stream_update is False
+        assert config.duplicate_window_seconds == 120.0
+        assert config.dlq_stream_name == "app-events-DLQ"
+        assert config.idempotency_bucket == "app-events-idem"
+        config.validate()
 
     def test_config_custom_values(self):
         """Test configuration with custom values."""

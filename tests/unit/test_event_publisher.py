@@ -33,6 +33,7 @@ class TestEventPublisher:
         store.publish_event = AsyncMock(return_value=42)
         store.connect = AsyncMock()
         store.disconnect = AsyncMock()
+        store.duplicate_window_seconds = 120.0
         return store
 
     def test_publisher_initialization(self, publisher, nats_config):
@@ -54,6 +55,17 @@ class TestEventPublisher:
 
         await publisher.disconnect()
         mock_event_store.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_retry_horizon_beyond_duplicate_window(
+        self, publisher, mock_event_store
+    ):
+        """Retries that outlive the stream dedupe window could store duplicates."""
+        mock_event_store.duplicate_window_seconds = 1.0
+        publisher._event_store = mock_event_store
+
+        with pytest.raises(PublishError, match="duplicate_window"):
+            await publisher.connect()
 
     def test_set_context(self, publisher):
         """Test setting publishing context."""

@@ -5,10 +5,12 @@ Unit Tests for Event Store
 Test the NATSEventStore class.
 """
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nats
 import pytest
+from nats.js.api import StreamConfig
 from nats.js.errors import NotFoundError
 
 from tc_nats_events.core.event_store import NATSEventStore
@@ -16,6 +18,7 @@ from tc_nats_events.models.event import Event
 from tc_nats_events.utils.exceptions import (
     ConnectionError,
     PublishError,
+    StreamConfigError,
 )
 
 
@@ -76,23 +79,108 @@ class TestNATSEventStore:
         assert call_args.name == event_store.stream_name
         assert call_args.subjects == [f"{event_store.subject_prefix}.>"]
 
+    @staticmethod
+    def _existing_stream(mock_jetstream, subjects, **overrides):
+        """Make stream_info return a realistic existing stream."""
+        params = {
+            "name": "test-events",
+            "subjects": subjects,
+            "duplicate_window": 120.0,
+            "max_age": 3600.0,
+            "num_replicas": 1,
+        }
+        params.update(overrides)
+        info = MagicMock()
+        info.config = StreamConfig(**params)
+        mock_jetstream.stream_info = AsyncMock(return_value=info)
+        mock_jetstream.update_stream = AsyncMock()
+        mock_jetstream.add_stream = AsyncMock()
+
     @pytest.mark.asyncio
-    async def test_ensure_stream_exists_updates_subjects(
+    async def test_existing_stream_non_covering_subjects_rejected(
         self, event_store, mock_jetstream
     ):
-        """Test updating stream when subjects have changed."""
+        """NATS-09: a stream that does not capture our subjects is never rewritten."""
         event_store._js = mock_jetstream
+        self._existing_stream(mock_jetstream, ["old.events.>"])
 
-        # Stream exists with different subjects
-        stream_info = MagicMock()
-        stream_info.config.subjects = ["old.events.>"]
-        mock_jetstream.stream_info.return_value = stream_info
-        mock_jetstream.update_stream = AsyncMock()
+        with pytest.raises(StreamConfigError, match="do not cover"):
+            await event_store._ensure_stream_exists()
+
+        mock_jetstream.update_stream.assert_not_called()
+        mock_jetstream.add_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "subjects",
+        [["test.events.>"], [">"], ["test.>", "other.>"]],
+    )
+    async def test_existing_stream_covering_subjects_accepted(
+        self, event_store, mock_jetstream, subjects
+    ):
+        """Exact or superset subjects are accepted without any update."""
+        event_store._js = mock_jetstream
+        self._existing_stream(mock_jetstream, subjects)
 
         await event_store._ensure_stream_exists()
 
-        # Should update stream
+        mock_jetstream.update_stream.assert_not_called()
+        mock_jetstream.add_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_existing_stream_drift_not_updated_by_default(
+        self, event_store, mock_jetstream
+    ):
+        """Drift (e.g. replicas) only warns unless allow_stream_update is set."""
+        event_store._js = mock_jetstream
+        self._existing_stream(mock_jetstream, ["test.events.>"], num_replicas=3)
+
+        await event_store._ensure_stream_exists()
+
+        mock_jetstream.update_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_existing_stream_adopts_server_duplicate_window(
+        self, event_store, mock_jetstream
+    ):
+        event_store._js = mock_jetstream
+        self._existing_stream(mock_jetstream, ["test.events.>"], duplicate_window=30.0)
+
+        await event_store._ensure_stream_exists()
+
+        assert event_store.duplicate_window_seconds == 30.0
+
+    @pytest.mark.asyncio
+    async def test_existing_stream_drift_with_allow_update_keeps_subjects(
+        self, nats_config, mock_jetstream
+    ):
+        """allow_stream_update=True updates settings but keeps existing subjects."""
+        store = NATSEventStore(replace(nats_config, allow_stream_update=True))
+        store._js = mock_jetstream
+        self._existing_stream(
+            mock_jetstream, ["test.events.>", "other.>"], num_replicas=3
+        )
+
+        await store._ensure_stream_exists()
+
         mock_jetstream.update_stream.assert_called_once()
+        updated = mock_jetstream.update_stream.call_args[0][0]
+        assert updated.subjects == ["test.events.>", "other.>"]
+        assert updated.num_replicas == 1
+
+    @pytest.mark.asyncio
+    async def test_existing_stream_update_appends_missing_subject_never_drops(
+        self, nats_config, mock_jetstream
+    ):
+        """Even with allow_stream_update, non-covering streams are rejected first."""
+        store = NATSEventStore(replace(nats_config, allow_stream_update=True))
+        store._js = mock_jetstream
+        self._existing_stream(mock_jetstream, ["old.events.>"], num_replicas=3)
+
+        with pytest.raises(StreamConfigError):
+            await store._ensure_stream_exists()
+
+        mock_jetstream.update_stream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_publish_event_success(
@@ -112,6 +200,8 @@ class TestNATSEventStore:
 
         assert sequence == 42
         mock_jetstream.publish.assert_called_once()
+        # Publishing must not query the stream (NATS-09 / no extra round trip)
+        mock_jetstream.stream_info.assert_not_called()
 
         # Check publish arguments
         call_args = mock_jetstream.publish.call_args

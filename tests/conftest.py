@@ -102,6 +102,7 @@ def mock_jetstream():
 
     # Mock consumer info
     consumer_info = MagicMock()
+    consumer_info.config = None  # tests needing reconcile set a real ConsumerConfig
     consumer_info.delivered.stream_seq = 50
     consumer_info.num_ack_pending = 5
     js.consumer_info = AsyncMock(return_value=consumer_info)
@@ -126,22 +127,44 @@ def mock_subscription():
 
 
 class MockNATSMessage:
-    """Mock NATS message for testing."""
+    """Mock NATS message for testing (ack/nak/term/in_progress are recorded)."""
 
-    def __init__(self, data: bytes, sequence: int = 1):
+    def __init__(
+        self,
+        data: bytes,
+        sequence: int = 1,
+        num_delivered: int = 1,
+        headers: dict | None = None,
+        subject: str = "test.events.created",
+    ):
         self.data = data
+        self.subject = subject
+        self.headers = headers
         self.metadata = MagicMock()
         self.metadata.sequence.stream = sequence
+        self.metadata.num_delivered = num_delivered
         self._acked = False
         self._nacked = False
+        self._termed = False
+        self.nak_delays: list = []
+        self.in_progress_calls = 0
 
     async def ack(self):
         """Mock acknowledgment."""
         self._acked = True
 
-    async def nak(self):
-        """Mock negative acknowledgment."""
+    async def nak(self, delay=None):
+        """Mock negative acknowledgment (records the requested delay)."""
         self._nacked = True
+        self.nak_delays.append(delay)
+
+    async def term(self):
+        """Mock terminate (no further redelivery)."""
+        self._termed = True
+
+    async def in_progress(self):
+        """Mock working-indicator heartbeat."""
+        self.in_progress_calls += 1
 
     @property
     def is_acked(self):
@@ -152,6 +175,11 @@ class MockNATSMessage:
     def is_nacked(self):
         """Check if message was negatively acknowledged."""
         return self._nacked
+
+    @property
+    def is_termed(self):
+        """Check if message was terminated."""
+        return self._termed
 
 
 @pytest.fixture
@@ -175,3 +203,27 @@ async def cleanup_streams():
     # This would connect to actual NATS and cleanup in integration tests
     yield
     # Cleanup code here if needed
+
+
+async def delete_config_streams(config) -> None:
+    """
+    Delete every stream a NATSConfig can create on a real server: the event
+    stream, its dead letter stream and the idempotency KV bucket stream.
+    Missing streams are ignored.
+    """
+    import nats
+
+    nc = await nats.connect(servers=config.servers)
+    try:
+        js = nc.jetstream()
+        for name in (
+            config.stream_name,
+            config.dlq_stream_name,
+            f"KV_{config.idempotency_bucket}",
+        ):
+            try:
+                await js.delete_stream(name)
+            except Exception:
+                pass  # stream does not exist
+    finally:
+        await nc.close()

@@ -2,7 +2,11 @@
 Idempotency Utilities
 ====================
 
-Utilities for ensuring idempotent event processing.
+Legacy, process-local idempotency helpers kept for backwards compatibility.
+
+Consumers now use :mod:`tc_nats_events.idempotency` (shared NATS KV store).
+This in-memory processor only deduplicates within a single process and, since
+0.2.0, never caches failures so a retry always re-runs the handler (NATS-02).
 """
 
 import asyncio
@@ -163,14 +167,10 @@ class IdempotentEventProcessor:
         """
         key = IdempotencyKey(event_id, handler_name)
 
-        # Check if already processed
+        # Only successes are remembered: a failed attempt must run again.
         existing_result = self.store.get(key)
-        if existing_result:
-            if existing_result.success:
-                return existing_result.result
-            else:
-                # Re-raise the previous error
-                raise existing_result.error or Exception("Previous processing failed")
+        if existing_result and existing_result.success:
+            return existing_result.result
 
         # Process the event
         try:
@@ -183,9 +183,8 @@ class IdempotentEventProcessor:
             self.store.set(key, ProcessingResult(success=True, result=result))
             return result
 
-        except Exception as e:
-            # Store failed result
-            self.store.set(key, ProcessingResult(success=False, error=e))
+        except Exception:
+            # Never cache failures (NATS-02): the redelivery must retry.
             raise
 
 

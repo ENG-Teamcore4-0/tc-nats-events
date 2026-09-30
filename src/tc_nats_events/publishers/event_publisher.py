@@ -66,9 +66,30 @@ class EventPublisher:
         self._current_user_id: Optional[str] = None
 
     async def connect(self) -> None:
-        """Connect to NATS."""
+        """Connect to NATS and check that retries stay inside the dedupe window."""
         await self._event_store.connect()
+        self._check_dedupe_window()
         logger.info(f"Publisher {self.service_name} connected")
+
+    @property
+    def retry_horizon_seconds(self) -> float:
+        """Worst-case time between the first and the last publish attempt."""
+        attempts = self.max_retry_attempts
+        delays = sum(self.retry_delay_base * (2**i) for i in range(attempts - 1))
+        return float(attempts * self.config.publish_timeout_seconds + delays)
+
+    def _check_dedupe_window(self) -> None:
+        """
+        A retry after a lost PubAck is only deduplicated inside the stream's
+        duplicate_window (NATS-01), so the retry horizon must fit in it.
+        """
+        window = self._event_store.duplicate_window_seconds
+        if self.retry_horizon_seconds > window:
+            raise PublishError(
+                f"Publish retry horizon ({self.retry_horizon_seconds:.0f}s) exceeds "
+                f"the stream duplicate_window ({window:.0f}s); retries could store "
+                "duplicates. Lower publish_timeout_seconds/retries or widen the window."
+            )
 
     async def disconnect(self) -> None:
         """Disconnect from NATS."""
@@ -111,7 +132,10 @@ class EventPublisher:
         Args:
             event_type: Type of event to publish
             data: Event payload
-            metadata: Optional event metadata (auto-generated if not provided)
+            metadata: Optional event metadata (auto-generated if not provided).
+                Pass ``EventMetadata(event_id=...)`` with a deterministic id
+                (see ``generate_deterministic_id``) so that re-publishing the
+                same business fact is deduplicated by JetStream.
 
         Returns:
             Stream sequence number

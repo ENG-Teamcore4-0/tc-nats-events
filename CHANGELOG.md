@@ -22,7 +22,7 @@ Upgrade steps: `docs/MIGRATION-0.2.md`.
 - `register_handler("*", h)` now registers a catch-all default handler (deprecated alias of `register_default_handler`). (NATS-11)
 - `NATSConfig.validate()` runs on connect/start and rejects `environment="production"` with `replicas < 3`. (NATS-05)
 - `DurableEventConsumer(batch_size=...)` default is 1 (was 10).
-- Requires nats-server >= 2.10 and nats-py >= 2.10.
+- Requires Python >= 3.11 (was 3.8; 3.8 and 3.9 are end-of-life), nats-server >= 2.10 and nats-py >= 2.10.
 - The legacy `utils.idempotency.IdempotentEventProcessor` no longer caches failures.
 
 ### Fixed

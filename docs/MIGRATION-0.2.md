@@ -11,7 +11,8 @@
 3. **Production replicas**: set `NATS_ENVIRONMENT=production` and `NATS_REPLICAS=3`
    (validation fails otherwise). To raise an existing stream from R1 to R3 run
    `nats stream edit <stream> --replicas 3` or start once with `NATS_ALLOW_STREAM_UPDATE=true`.
-4. **Pin the dependency**: `tc-nats-events @ git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v0.2.0`.
+4. **Python >= 3.11** in the service image.
+5. **Pin the dependency**: `tc-nats-events @ git+https://github.com/ENG-Teamcore4-0/tc-nats-events.git@v0.2.0`.
 
 ## 2. Deploy all replicas at once
 

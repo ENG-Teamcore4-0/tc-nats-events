@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/ci.yml)
 [![Auto Release](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/auto-release.yml/badge.svg?branch=main)](https://github.com/ENG-Teamcore4-0/tc-nats-events/actions/workflows/auto-release.yml)
-[![Python versions](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
+[![Python versions](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 
 Event Sourcing and Durable Consumers for NATS JetStream - Teamcore Architecture Team
 

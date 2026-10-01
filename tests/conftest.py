@@ -6,6 +6,7 @@ Common fixtures and configuration for all tests.
 """
 
 import asyncio
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -134,7 +135,7 @@ class MockNATSMessage:
         data: bytes,
         sequence: int = 1,
         num_delivered: int = 1,
-        headers: dict | None = None,
+        headers: Optional[dict] = None,
         subject: str = "test.events.created",
     ):
         self.data = data

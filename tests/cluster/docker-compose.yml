@@ -1,0 +1,20 @@
+# 3-node JetStream cluster used by tests/cluster (NATS-05: R3 streams).
+x-nats: &nats
+  image: nats:2.10-alpine
+
+services:
+  n1:
+    <<: *nats
+    container_name: tc-nats-n1
+    command: -js -sd /data -n n1 -m 8222 --cluster_name tc --cluster nats://0.0.0.0:6222 --no_advertise --routes nats://n2:6222,nats://n3:6222
+    ports: ["14222:4222", "18222:8222"]
+  n2:
+    <<: *nats
+    container_name: tc-nats-n2
+    command: -js -sd /data -n n2 -m 8222 --cluster_name tc --cluster nats://0.0.0.0:6222 --no_advertise --routes nats://n1:6222,nats://n3:6222
+    ports: ["14223:4222", "18223:8222"]
+  n3:
+    <<: *nats
+    container_name: tc-nats-n3
+    command: -js -sd /data -n n3 -m 8222 --cluster_name tc --cluster nats://0.0.0.0:6222 --no_advertise --routes nats://n1:6222,nats://n2:6222
+    ports: ["14224:4222", "18224:8222"]

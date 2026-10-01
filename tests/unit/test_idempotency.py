@@ -271,34 +271,43 @@ class TestIdempotentEventProcessor:
         assert result == "value1-value2-kwvalue"
 
     @pytest.mark.asyncio
-    async def test_handler_failure_caching(self):
-        """Test that failures are also cached."""
+    async def test_handler_failure_not_cached(self):
+        """Failures are never cached: a retry re-runs the handler (NATS-02)."""
         processor = IdempotentEventProcessor()
 
         call_count = 0
 
-        def failing_handler():
+        def flaky_handler():
             nonlocal call_count
             call_count += 1
-            raise ValueError("Handler failed")
+            if call_count == 1:
+                raise ValueError("Handler failed")
+            return "ok"
 
-        # First execution should fail
         with pytest.raises(ValueError, match="Handler failed"):
             await processor.process_with_idempotency(
                 event_id="event-123",
-                handler_name="failing_handler",
-                handler_func=failing_handler,
+                handler_name="flaky_handler",
+                handler_func=flaky_handler,
             )
 
-        # Second execution should re-raise cached error
-        with pytest.raises(ValueError, match="Handler failed"):
-            await processor.process_with_idempotency(
-                event_id="event-123",
-                handler_name="failing_handler",
-                handler_func=failing_handler,
-            )
+        # The retry runs the handler again instead of replaying the error
+        result = await processor.process_with_idempotency(
+            event_id="event-123",
+            handler_name="flaky_handler",
+            handler_func=flaky_handler,
+        )
 
-        assert call_count == 1  # Handler called only once
+        assert result == "ok"
+        assert call_count == 2
+
+        # Success IS cached: a third call does not run the handler again
+        await processor.process_with_idempotency(
+            event_id="event-123",
+            handler_name="flaky_handler",
+            handler_func=flaky_handler,
+        )
+        assert call_count == 2
 
     @pytest.mark.asyncio
     async def test_different_handlers_same_event(self):

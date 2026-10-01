@@ -10,6 +10,8 @@ Run with: docker run -d -p 4222:4222 nats:latest -js
 
 import asyncio
 import os
+import time
+from dataclasses import replace
 from typing import Dict, List
 
 import pytest
@@ -21,6 +23,7 @@ from tc_nats_events import (
     NATSConfig,
     setup_logging,
 )
+from tests.conftest import delete_config_streams
 
 # Skip integration tests if NATS is not available
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
@@ -52,31 +55,10 @@ class TestEndToEnd:
 
     @pytest.fixture
     async def cleanup_stream(self, config):
-        """Cleanup test stream before and after tests."""
-        from tc_nats_events.core.event_store import NATSEventStore
-
-        # Cleanup before test
-        store = NATSEventStore(config)
-        try:
-            await store.connect()
-            # Try to delete existing stream
-            try:
-                await store._js.delete_stream(config.stream_name)
-            except Exception:
-                pass  # Stream might not exist
-            await store.disconnect()
-        except Exception:
-            pass
-
+        """Delete the event, DLQ and idempotency KV streams before and after."""
+        await delete_config_streams(config)
         yield
-
-        # Cleanup after test
-        try:
-            await store.connect()
-            await store._js.delete_stream(config.stream_name)
-            await store.disconnect()
-        except Exception:
-            pass
+        await delete_config_streams(config)
 
     @pytest.mark.asyncio
     async def test_basic_publish_consume(self, config, cleanup_stream):
@@ -144,6 +126,9 @@ class TestEndToEnd:
         import time
 
         """Test that durable consumer recovers from where it left off."""
+        # Events are published before the durable exists, so replay from the start
+        # (the default deliver_policy is "new").
+        config = replace(config, deliver_policy="all")
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
 
@@ -268,8 +253,13 @@ class TestEndToEnd:
             for i in range(20):
                 await publisher.publish(event_type="balanced", data={"id": i})
 
-            # Wait for processing
-            await asyncio.sleep(0.5)
+            # Wait until all 20 events were handled (or give up after 15s)
+            deadline = time.time() + 15.0
+            while (
+                len(consumer1_events) + len(consumer2_events) < 20
+                and time.time() < deadline
+            ):
+                await asyncio.sleep(0.05)
 
             # Verify load was distributed
             assert len(consumer1_events) > 0
@@ -360,7 +350,9 @@ class TestEndToEnd:
             subject_prefix="test.retry",
             max_deliver_attempts=5,
             ack_wait_seconds=2,
+            nak_delays_seconds=(0.2, 0.2, 0.2, 0.2),  # fast retries for the test
         )
+        await delete_config_streams(retry_config)
 
         # Create event store to ensure stream exists
         from tc_nats_events.core.event_store import NATSEventStore
@@ -380,16 +372,15 @@ class TestEndToEnd:
 
             await publisher.publish(event_type="retry", data={"id": "retry-1"})
 
-            # Wait for retries and processing
-            await asyncio.sleep(1.5)
+            # Wait for the delayed retries to succeed (or give up after 15s)
+            deadline = time.time() + 15.0
+            while not successful_events and time.time() < deadline:
+                await asyncio.sleep(0.05)
 
-            # Verify event was processed (even if only once due to idempotency)
-            # The fact that we see multiple errors in logs shows retry is working at NATS level
-            assert (
-                process_attempts["retry-1"] >= 1
-            ), f"Event should be processed at least once: {process_attempts}"
-            # For now, we'll accept that idempotency prevents multiple handler executions
-            # This is actually correct behavior in production
+            # Failures are not cached: the handler re-runs on every redelivery
+            # until it succeeds on the 3rd attempt.
+            assert process_attempts["retry-1"] == 3, process_attempts
+            assert successful_events == ["retry-1"]
 
             await publisher.disconnect()
 
@@ -398,10 +389,4 @@ class TestEndToEnd:
             await store.disconnect()
 
             # Cleanup retry stream
-            cleanup_store = NATSEventStore(retry_config)
-            try:
-                await cleanup_store.connect()
-                await cleanup_store._js.delete_stream(retry_config.stream_name)
-                await cleanup_store.disconnect()
-            except Exception:
-                pass
+            await delete_config_streams(retry_config)

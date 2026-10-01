@@ -2,7 +2,16 @@
 Durable Event Consumer
 ======================
 
-Implementation of durable consumer pattern with automatic synchronization and recovery.
+Pull-based durable consumer shared by every replica of a service.
+
+Delivery guarantees:
+
+* at-least-once: explicit ack only after the handler succeeds;
+* effectively-once side effects: a shared idempotency store (NATS KV by
+  default) skips messages another replica or a previous run already handled;
+* failures are retried with delays (``nak_delays_seconds``) and end in the dead
+  letter queue after ``max_deliver_attempts`` instead of being dropped;
+* long handlers keep their messages alive with ``in_progress()`` heartbeats.
 """
 
 import asyncio
@@ -15,16 +24,34 @@ import nats
 from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 from nats.js import JetStreamContext
-from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, ReplayPolicy
 
+from ..idempotency import (
+    IdempotencyStore,
+    IdempotentProcessor,
+    MemoryIdempotencyStore,
+    NatsKVIdempotencyStore,
+    idempotency_key,
+)
 from ..models.event import Event
 from ..utils.config import NATSConfig
 from ..utils.exceptions import ConnectionError, ConsumerError
-from ..utils.idempotency import get_idempotent_processor
 from ..utils.metrics import get_metrics_collector
-from .base_consumer import BaseEventConsumer
+from ..utils.server_version import ensure_server_version
+from .base_consumer import BaseEventConsumer, invoke_handler
+from .bootstrap import ensure_consumer, ensure_stream
+from .dlq import DeadLetterAdvisoryListener, DeadLetterPublisher
+from .message_handler import MessageHandler, Result
+from .redelivery import message_identity
+from .supervisor import (
+    MAX_CONSECUTIVE_ERRORS,
+    HealthSnapshot,
+    error_delay,
+    restart_delay,
+)
 
 logger = logging.getLogger(__name__)
+
+DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class ConsumerState(str, Enum):
@@ -40,36 +67,29 @@ class ConsumerState(str, Enum):
 
 
 class DurableEventConsumer(BaseEventConsumer):
-    """
-    Durable consumer with automatic synchronization and recovery.
-
-    Features:
-    - Automatic synchronization from event #1
-    - At-least-once delivery guarantee
-    - Horizontal scaling support
-    - Automatic recovery on failure
-    - Flow control and backpressure handling
-    """
+    """Durable, horizontally scalable consumer with retries, DLQ and dedupe."""
 
     def __init__(
         self,
         service_name: str,
         config: NATSConfig,
-        batch_size: int = 10,
+        batch_size: int = 1,
         fetch_timeout: float = 2.0,
-        adapters: Optional[List] = None,
+        adapters: Optional[List[Any]] = None,
         auto_adapt: bool = True,
+        idempotency_store: Optional[IdempotencyStore] = None,
     ):
         """
-        Initialize durable event consumer.
-
         Args:
-            service_name: Name of the consuming service
+            service_name: Name of the consuming service (durable = "<name>-consumer")
             config: NATS configuration
-            batch_size: Number of messages to fetch per batch
+            batch_size: Messages per fetch. Queued messages are kept alive with
+                heartbeats, but small batches keep redelivery latency low.
             fetch_timeout: Timeout for fetch operations in seconds
-            adapters: List of EventAdapter instances for handling different event formats
-            auto_adapt: If True, automatically adds FlexibleAdapter to handle any format
+            adapters: EventAdapter instances for handling different event formats
+            auto_adapt: If True, add FlexibleAdapter to handle any format
+            idempotency_store: Override the store selected by
+                ``config.idempotency_backend``
         """
         super().__init__(service_name)
 
@@ -77,65 +97,71 @@ class DurableEventConsumer(BaseEventConsumer):
         self.batch_size = batch_size
         self.fetch_timeout = fetch_timeout
 
-        # Setup adapters with auto-adaptation
-        self.adapters = adapters or []
+        self.adapters = list(adapters or [])
         if auto_adapt:
-            # Import here to avoid circular imports
             from ..adapters.generic_adapter import FlexibleAdapter
 
-            # Add FlexibleAdapter as fallback if not already present
-            if not any(
-                isinstance(adapter, FlexibleAdapter) for adapter in self.adapters
-            ):
+            if not any(isinstance(a, FlexibleAdapter) for a in self.adapters):
                 self.adapters.append(FlexibleAdapter())
 
-        # NATS components
         self._nc: Optional[NATS] = None
         self._js: Optional[JetStreamContext] = None
         self._subscription: Optional[Any] = None
+        self._custom_store = idempotency_store
+        self._store: Optional[IdempotencyStore] = None
+        self._processor: Optional[IdempotentProcessor] = None
+        self._handler: Optional[MessageHandler] = None
+        self._dead_letters: Optional[DeadLetterPublisher] = None
+        self._advisories: Optional[DeadLetterAdvisoryListener] = None
 
-        # Consumer configuration
         self.stream_name = config.stream_name
         self.consumer_name = f"{service_name}-consumer"
         self.subject_filter = f"{config.subject_prefix}.>"
 
-        # State management
         self._consumer_state = ConsumerState.IDLE
         self._is_running = False
         self._processing_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
 
-        # Synchronization tracking
         self._sync_start_time: Optional[datetime] = None
         self._sync_complete_time: Optional[datetime] = None
         self._initial_sync_complete = False
 
-        # Error handling
         self._consecutive_errors = 0
-        self._max_consecutive_errors = 10
+        self._max_consecutive_errors = MAX_CONSECUTIVE_ERRORS
+        self._health = HealthSnapshot()
 
-        # Metrics and idempotency
         self._metrics = get_metrics_collector(service_name)
-        self._idempotent_processor = get_idempotent_processor()
 
-        # Processing counters
         self.events_processed: int = 0
         self.events_failed: int = 0
         self.last_processed_sequence: int = 0
 
+    # ------------------------------------------------------------------ state
     @property
     def state(self) -> ConsumerState:
-        """Get current consumer state."""
         return self._consumer_state
 
     @property
     def is_synced(self) -> bool:
-        """Check if initial synchronization is complete."""
         return self._initial_sync_complete
 
+    def health(self) -> Dict[str, Any]:
+        """Readiness information: healthy only while fetching successfully."""
+        return self._health.as_dict(
+            self._consumer_state.value,
+            self._is_running,
+            self.config.health_stale_seconds,
+        )
+
+    @property
+    def is_healthy(self) -> bool:
+        return bool(self.health()["healthy"])
+
+    # -------------------------------------------------------------- lifecycle
     async def start(self) -> None:
         """
-        Start the consumer with automatic synchronization.
+        Connect, reconcile stream/consumer/DLQ/idempotency and start the loop.
 
         Raises:
             ConsumerError: If startup fails
@@ -144,144 +170,243 @@ class DurableEventConsumer(BaseEventConsumer):
             if self._is_running:
                 logger.warning(f"Consumer {self.service_name} already running")
                 return
-
             try:
                 self._consumer_state = ConsumerState.STARTING
-                logger.info(f"Starting consumer: {self.service_name}")
-
-                # Connect to NATS
+                self.config.validate()
                 await self._connect()
-
-                # Setup durable consumer
                 await self._setup_consumer()
-
-                # Start processing
                 self._is_running = True
-                self._processing_task = asyncio.create_task(
-                    self._event_processing_loop()
-                )
-
+                self._processing_task = asyncio.create_task(self._supervised_loop())
+                self._processing_task.add_done_callback(self._on_loop_done)
                 logger.info(f"Consumer {self.service_name} started successfully")
-
             except Exception as e:
                 self._consumer_state = ConsumerState.ERROR
                 logger.error(f"Failed to start consumer: {e}")
-                raise ConsumerError(f"Consumer startup failed: {e}")
+                await self._close_connection()
+                raise ConsumerError(f"Consumer startup failed: {e}") from e
 
     async def _connect(self) -> None:
-        """Connect to NATS server."""
         try:
-            connect_options = {
+            options: Dict[str, Any] = {
                 "name": f"{self.config.client_name}-{self.service_name}",
                 "reconnect_time_wait": self.config.reconnect_time_wait,
                 "max_reconnect_attempts": self.config.max_reconnect_attempts,
             }
-
             if self.config.user and self.config.password:
-                connect_options["user"] = self.config.user
-                connect_options["password"] = self.config.password
-
-            self._nc = await nats.connect(
-                servers=self.config.servers, **connect_options
-            )
-            self._js = self._nc.jetstream()
-
-            logger.info("Connected to NATS for consumer")
-
+                options["user"] = self.config.user
+                options["password"] = self.config.password
+            self._nc = await nats.connect(servers=self.config.servers, **options)
         except Exception as e:
             logger.error(f"NATS connection failed: {e}")
             raise ConnectionError(f"Failed to connect to NATS: {e}")
+        ensure_server_version(self._nc)
+        self._js = self._nc.jetstream()
+        logger.info("Connected to NATS for consumer")
 
-    async def _setup_consumer(self) -> None:
-        """Setup durable consumer configuration."""
-        try:
-            # First, check if stream exists
-            if self._js is None:
-                raise ConsumerError("JetStream context not initialized")
-
-            try:
-                await self._js.stream_info(self.stream_name)
-                logger.info(f"Stream '{self.stream_name}' exists")
-            except nats.js.errors.NotFoundError:
-                logger.info(f"Stream '{self.stream_name}' not found, creating it...")
-                await self._create_stream_if_not_exists()
-                logger.info(f"Stream '{self.stream_name}' created successfully")
-
-            # Check if consumer exists
-            try:
-                info = await self._js.consumer_info(
-                    self.stream_name, self.consumer_name
-                )
-                logger.info(
-                    f"Durable consumer exists: {self.consumer_name}, "
-                    f"delivered={info.delivered.stream_seq}, "
-                    f"pending={info.num_ack_pending}"
-                )
-
-            except nats.js.errors.NotFoundError:
-                # Create new durable consumer
-                await self._create_consumer()
-
-            # Create pull subscription
-            if self._js is None:
-                raise ConsumerError("JetStream context not initialized")
-            self._subscription = await self._js.pull_subscribe(
-                subject="",  # Empty - uses consumer's filter
-                durable=self.consumer_name,
-                stream=self.stream_name,
-            )
-
-        except Exception as e:
-            logger.error(f"Consumer setup failed: {e}")
-            raise ConsumerError(f"Failed to setup consumer: {e}")
-
-    async def _create_consumer(self) -> None:
-        """Create new durable consumer with optimal configuration."""
-        config = ConsumerConfig(
-            # Identity
-            name=self.consumer_name,
-            durable_name=self.consumer_name,
-            # Delivery configuration
-            deliver_policy=DeliverPolicy.ALL,  # Start from beginning
-            ack_policy=AckPolicy.EXPLICIT,
-            replay_policy=ReplayPolicy.INSTANT,
-            # Subject filtering
-            filter_subject=self.subject_filter,
-            # Reliability settings
-            max_deliver=self.config.max_deliver_attempts,
-            ack_wait=self.config.ack_wait_seconds,
-            # Flow control
-            max_ack_pending=self.config.max_ack_pending,
-            # Sampling (process all events)
-            sample_freq=None,
-        )
-
+    def _jetstream(self) -> JetStreamContext:
         if self._js is None:
             raise ConsumerError("JetStream context not initialized")
-        await self._js.add_consumer(self.stream_name, config)
-        logger.info(f"Created durable consumer: {self.consumer_name}")
+        return self._js
 
-    async def _event_processing_loop(self) -> None:
-        """Main event processing loop."""
-        logger.info(f"Starting event processing loop for {self.service_name}")
+    def _build_store(self, js: JetStreamContext) -> IdempotencyStore:
+        if self._custom_store is not None:
+            return self._custom_store
+        if self.config.idempotency_backend == "memory":
+            logger.warning(
+                "Using in-memory idempotency: no dedupe across replicas/restarts"
+            )
+            return MemoryIdempotencyStore(self.config.idempotency_ttl_seconds)
+        return NatsKVIdempotencyStore(
+            js,
+            bucket=self.config.idempotency_bucket,
+            ttl_seconds=self.config.idempotency_ttl_seconds,
+            replicas=self.config.replicas,
+            clock_skew_seconds=self.config.clock_skew_seconds,
+        )
 
+    async def _setup_consumer(self) -> None:
+        js = self._jetstream()
+        await ensure_stream(js, self.config)
+
+        self._store = self._build_store(js)
+        await self._store.setup()
+        self._processor = IdempotentProcessor(
+            self._store,
+            lease_seconds=self.config.idempotency_lease_seconds,
+            heartbeat_interval=self.config.heartbeat_interval_seconds,
+            handler_timeout=self.config.handler_timeout_seconds,
+            on_event=self._metrics.record_reliability_event,
+        )
+
+        if self.config.dlq_enabled:
+            self._dead_letters = DeadLetterPublisher(
+                js, self.config, self.consumer_name
+            )
+            await self._dead_letters.ensure_stream()
+
+        self._handler = MessageHandler(
+            consumer_name=self.consumer_name,
+            config=self.config,
+            adapters=self.adapters,
+            get_handler=self.get_handler,
+            processor=self._processor,
+            dead_letters=self._dead_letters,
+            metrics=self._metrics,
+            on_progress=self._mark_progress,
+        )
+
+        # Reconcile BEFORE binding: pull_subscribe ignores config on existing
+        # durables and silently creates a default one if it is missing.
+        await ensure_consumer(js, self.config, self.consumer_name, self.subject_filter)
+
+        if self.config.dlq_enabled:
+            # Listen before pulling so no advisory is missed.
+            self._advisories = DeadLetterAdvisoryListener(
+                js,
+                self.config,
+                self.consumer_name,
+                nc=self._nc,
+                is_settled=self._is_settled,
+            )
+            await self._advisories.start()
+
+        await self._subscribe()
+
+    async def _is_settled(self, subject: str, headers: Any, stream_seq: int) -> bool:
+        """True if the message is already done or leased by a live replica."""
+        if self._store is None:
+            return False
+        identity = message_identity(subject, headers, self.stream_name, stream_seq)
+        status = await self._store.status(idempotency_key(self.consumer_name, identity))
+        return status is not None
+
+    async def _subscribe(self) -> None:
+        self._subscription = await self._jetstream().pull_subscribe(
+            subject="",  # the durable's filter applies
+            durable=self.consumer_name,
+            stream=self.stream_name,
+        )
+
+    async def _resubscribe(self) -> None:
+        """Drop the old pull subscription and re-reconcile before binding again."""
+        old, self._subscription = self._subscription, None
+        if old is not None:
+            try:
+                await old.unsubscribe()
+            except Exception as e:
+                logger.debug(f"Old subscription cleanup failed: {e}")
+        js = self._jetstream()
+        await ensure_stream(js, self.config)
+        await ensure_consumer(js, self.config, self.consumer_name, self.subject_filter)
+        await self._subscribe()
+
+    def _stopping(self) -> bool:
+        """stop() may have flipped the flag while we were awaiting."""
+        return not self._is_running
+
+    def _mark_progress(self) -> None:
+        self._health = self._health.progress()
+
+    async def _close_connection(self) -> None:
+        if self._advisories is not None:
+            await self._advisories.stop()
+        # A cancelled fetch can leave an item in the pull subscription's queue,
+        # which blocks drain() until its 30s timeout: unsubscribe it first.
+        subscription, self._subscription = self._subscription, None
+        if subscription is not None:
+            try:
+                await subscription.unsubscribe()
+            except Exception as e:
+                logger.debug(f"Pull subscription cleanup failed: {e}")
+        if self._nc is None:
+            return
+        try:
+            await asyncio.wait_for(self._nc.drain(), timeout=DRAIN_TIMEOUT_SECONDS)
+        except Exception as e:
+            logger.warning(f"NATS drain failed: {e!r}")
+        finally:
+            try:
+                await self._nc.close()
+            except Exception as e:
+                logger.debug(f"NATS close failed: {e}")
+
+    async def stop(self) -> None:
+        """Gracefully stop: in-flight messages are nak'ed back, then drain."""
+        async with self._lock:
+            if not self._is_running:
+                return
+            logger.info(f"Stopping consumer: {self.service_name}")
+            self._consumer_state = ConsumerState.STOPPING
+            self._is_running = False
+            try:
+                task = self._processing_task
+                if task is not None and not task.done():
+                    task.cancel()
+                    # asyncio.wait never swallows a cancellation aimed at stop().
+                    await asyncio.wait([task])
+            finally:
+                await self._close_connection()
+                self._consumer_state = ConsumerState.STOPPED
+                logger.info(f"Consumer stopped: {self.service_name}")
+
+    # ------------------------------------------------------------------- loop
+    def _on_loop_done(self, task: "asyncio.Task[None]") -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self._consumer_state = ConsumerState.ERROR
+            logger.error(f"Consumer loop crashed unexpectedly: {error!r}")
+
+    async def _supervised_loop(self) -> None:
+        """Run the fetch loop forever, restarting it after repeated failures."""
         self._consumer_state = ConsumerState.SYNCING
         self._sync_start_time = datetime.now(timezone.utc)
+        while self._is_running:
+            await self._event_processing_loop()
+            if self._stopping():
+                break
+            self._health = self._health.restarted()
+            delay = restart_delay(self._health.restart_streak)
+            logger.error(
+                f"Consumer loop stopped after {self._max_consecutive_errors} errors; "
+                f"restart #{self._health.restarts} in {delay:.0f}s"
+            )
+            await asyncio.sleep(delay)
+            try:
+                await self._resubscribe()
+                self._consecutive_errors = 0
+                self._consumer_state = (
+                    ConsumerState.LIVE
+                    if self._initial_sync_complete
+                    else ConsumerState.SYNCING
+                )
+            except Exception as e:
+                self._health = self._health.failed(e)
+                logger.error(f"Resubscribe failed: {e}")
 
+    async def _event_processing_loop(self) -> None:
+        """Fetch/process until too many consecutive fetch errors (or stop)."""
         while self._is_running:
             try:
                 messages = await self._fetch_messages()
-                await self._handle_messages(messages)
             except asyncio.TimeoutError:
+                # Only a *fetch* timeout means "no messages"; processing errors
+                # are handled per message and never reach this branch.
+                self._health = self._health.fetch_ok()
                 await self._handle_timeout()
+                continue
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
+                self._health = self._health.failed(e)
                 if not await self._handle_processing_error(e):
-                    break
-
-        logger.info(f"Event processing loop ended for {self.service_name}")
+                    return
+                continue
+            self._health = self._health.fetch_ok()
+            await self._handle_messages(messages)
 
     async def _fetch_messages(self) -> List[Msg]:
-        """Fetch batch of messages from subscription."""
         if self._subscription is None:
             raise ConsumerError("Subscription not initialized")
         return cast(
@@ -292,191 +417,111 @@ class DurableEventConsumer(BaseEventConsumer):
         )
 
     async def _handle_messages(self, messages: List[Msg]) -> None:
-        """Handle fetched messages."""
         if messages:
             await self._process_batch(messages)
-            self._consecutive_errors = 0  # Reset error counter
-
-            # Log progress during sync
+            self._consecutive_errors = 0
             if self._consumer_state == ConsumerState.SYNCING:
                 logger.info(
                     f"Syncing: processed {len(messages)} events, "
                     f"total={self.events_processed}"
                 )
-        else:
-            # No messages - check if sync complete
-            if self._consumer_state == ConsumerState.SYNCING:
-                await self._complete_sync()
+        elif self._consumer_state == ConsumerState.SYNCING:
+            await self._complete_sync()
 
     async def _handle_timeout(self) -> None:
-        """Handle timeout when fetching messages."""
-        # Normal timeout - no new messages
         if self._consumer_state == ConsumerState.SYNCING:
             await self._complete_sync()
 
     async def _handle_processing_error(self, error: Exception) -> bool:
-        """Handle processing errors. Returns True to continue, False to stop."""
+        """Returns True to continue, False to hand over to the supervisor."""
         self._consecutive_errors += 1
         logger.error(f"Processing error (#{self._consecutive_errors}): {error}")
-
         if self._consecutive_errors >= self._max_consecutive_errors:
-            logger.error("Max consecutive errors reached, stopping")
             self._consumer_state = ConsumerState.ERROR
             return False
-
-        # Backoff on error
-        await asyncio.sleep(min(self._consecutive_errors, 10))
+        await asyncio.sleep(error_delay(self._consecutive_errors))
         return True
 
     async def _process_batch(self, messages: List[Msg]) -> None:
-        """Process a batch of messages."""
-        for msg in messages:
-            try:
-                await self._process_message(msg)
-            except Exception as e:
-                logger.error(f"Failed to process message: {e}")
-                await msg.nak()  # NACK for retry
+        """Process sequentially; queued messages get heartbeats meanwhile."""
+        for index, msg in enumerate(messages):
+            await self._process_message(msg, pending=messages[index + 1 :])
 
-    async def _process_message(self, msg: Msg) -> None:
-        """Process a single message."""
+    async def _process_message(
+        self, msg: Msg, pending: Optional[List[Msg]] = None
+    ) -> None:
+        if self._handler is None:
+            raise ConsumerError("Consumer not set up")
         start_time = self._metrics.record_consume_start()
-
         try:
-            # Parse event with adapters
-            event = Event.from_json(msg.data, adapters=self.adapters)
-
-            # Add sequence from NATS
-            event = event.with_sequence(msg.metadata.sequence.stream)
-
-            # Process through handlers with idempotency
-            await self.process_event(event)
-
-            # ACK after successful processing
-            await msg.ack()
-
-            # Update metrics
-            self.events_processed += 1
-            self.last_processed_sequence = event.sequence or 0
-            self._metrics.record_consume_success(start_time)
-
-            logger.debug(
-                "Message processed successfully",
-                extra={
-                    "event_type": event.event_type,
-                    "sequence": event.sequence,
-                    "event_id": event.metadata.event_id if event.metadata else None,
-                    "service_name": self.service_name,
-                },
-            )
-
-        except Exception as e:
-            self._metrics.record_consume_error("processing")
-            logger.error(
-                f"Message processing failed: {e}, "
-                f"sequence={msg.metadata.sequence.stream}",
-                extra={
-                    "sequence": msg.metadata.sequence.stream,
-                    "service_name": self.service_name,
-                    "error": str(e),
-                },
-            )
+            result = await self._handler.handle(msg, list(pending or []))
+        except asyncio.CancelledError:
             raise
+        except Exception as e:  # defensive: MessageHandler isolates its own errors
+            logger.error(
+                f"Unexpected error handling seq={msg.metadata.sequence.stream}: {e!r}"
+            )
+            return
+        self._mark_progress()
+        if result in (Result.PROCESSED, Result.DUPLICATE):
+            self.events_processed += 1
+            self.last_processed_sequence = msg.metadata.sequence.stream
+            self._metrics.record_consume_success(start_time)
+        elif result in (Result.RETRY, Result.DEAD_LETTERED):
+            self.events_failed += 1
 
     async def process_event(self, event: Event) -> None:
         """
-        Process event through registered handlers with idempotency.
+        Run the registered handler for ``event`` with idempotency by event_id.
 
-        Args:
-            event: Event to process
+        Used for direct invocation; the fetch loop goes through
+        ``_process_message`` which also handles ack/nak/DLQ.
         """
         handler = self.get_handler(event.event_type)
-
-        if handler:
-            try:
-                # Process with idempotency guarantee
-                if event.metadata is None:
-                    raise ConsumerError("Event metadata is required")
-                await self._idempotent_processor.process_with_idempotency(
-                    event.metadata.event_id,
-                    f"{self.service_name}.{event.event_type}",
-                    handler,
-                    event,
-                )
-
-            except Exception as e:
-                self.events_failed += 1
-                event_id = event.metadata.event_id if event.metadata else "unknown"
-                logger.error(
-                    f"Handler failed for {event.event_type}: {e}, "
-                    f"event_id={event_id}",
-                    extra={
-                        "event_type": event.event_type,
-                        "event_id": event.metadata.event_id if event.metadata else None,
-                        "service_name": self.service_name,
-                        "error": str(e),
-                    },
-                )
-                raise
-        else:
-            logger.warning(
-                f"No handler for event type: {event.event_type}, "
-                f"sequence={event.sequence}",
-                extra={
-                    "event_type": event.event_type,
-                    "sequence": event.sequence,
-                    "service_name": self.service_name,
-                },
+        if handler is None:
+            logger.warning(f"No handler for event type: {event.event_type}")
+            return
+        if event.metadata is None:
+            raise ConsumerError("Event metadata is required")
+        if self._processor is None:
+            self._processor = IdempotentProcessor(
+                (
+                    self._custom_store
+                    if self._custom_store is not None
+                    else MemoryIdempotencyStore(self.config.idempotency_ttl_seconds)
+                ),
+                lease_seconds=self.config.idempotency_lease_seconds,
+                heartbeat_interval=self.config.heartbeat_interval_seconds,
+                handler_timeout=self.config.handler_timeout_seconds,
             )
+        try:
+            await self._processor.run(
+                idempotency_key(self.consumer_name, event.metadata.event_id),
+                lambda: invoke_handler(handler, event),
+            )
+        except Exception:
+            self.events_failed += 1
+            raise
 
+    # ------------------------------------------------------------------- sync
     async def _complete_sync(self) -> None:
-        """Mark initial synchronization as complete."""
-        if not self._initial_sync_complete:
-            self._initial_sync_complete = True
-            self._consumer_state = ConsumerState.LIVE
-            self._sync_complete_time = datetime.now(timezone.utc)
-
-            sync_duration = (
-                self._sync_complete_time
-                - (self._sync_start_time or self._sync_complete_time)
-            ).total_seconds()
-
-            logger.info(
-                f"Initial sync completed: "
-                f"service={self.service_name}, "
-                f"events={self.events_processed}, "
-                f"duration={sync_duration:.2f}s, "
-                f"last_seq={self.last_processed_sequence}"
-            )
-
-    async def stop(self) -> None:
-        """Gracefully stop the consumer."""
-        async with self._lock:
-            if not self._is_running:
-                return
-
-            logger.info(f"Stopping consumer: {self.service_name}")
-            self._consumer_state = ConsumerState.STOPPING
-            self._is_running = False
-
-            # Cancel processing task
-            if self._processing_task:
-                self._processing_task.cancel()
-                try:
-                    await self._processing_task
-                except asyncio.CancelledError:
-                    pass
-
-            # Close NATS connection
-            if self._nc:
-                await self._nc.drain()
-                await self._nc.close()
-
-            self._consumer_state = ConsumerState.STOPPED
-            logger.info(f"Consumer stopped: {self.service_name}")
+        if self._initial_sync_complete:
+            return
+        self._initial_sync_complete = True
+        self._consumer_state = ConsumerState.LIVE
+        self._sync_complete_time = datetime.now(timezone.utc)
+        duration = (
+            self._sync_complete_time
+            - (self._sync_start_time or self._sync_complete_time)
+        ).total_seconds()
+        logger.info(
+            f"Initial sync completed: service={self.service_name}, "
+            f"events={self.events_processed}, duration={duration:.2f}s, "
+            f"last_seq={self.last_processed_sequence}"
+        )
 
     def get_sync_status(self) -> Dict[str, Any]:
-        """Get synchronization status."""
-        status = {
+        status: Dict[str, Any] = {
             "service_name": self.service_name,
             "state": self._consumer_state.value,
             "is_synced": self._initial_sync_complete,
@@ -485,10 +530,8 @@ class DurableEventConsumer(BaseEventConsumer):
             "last_sequence": self.last_processed_sequence,
             "state_size": len(self._state),
         }
-
         if self._sync_start_time:
             status["sync_start_time"] = self._sync_start_time.isoformat()
-
         if self._sync_complete_time:
             status["sync_complete_time"] = self._sync_complete_time.isoformat()
             status["sync_duration_seconds"] = int(
@@ -497,38 +540,11 @@ class DurableEventConsumer(BaseEventConsumer):
                     - (self._sync_start_time or self._sync_complete_time)
                 ).total_seconds()
             )
-
         return status
 
-    # Context manager support
-
     async def __aenter__(self) -> "DurableEventConsumer":
-        """Async context manager entry."""
         await self.start()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Async context manager exit."""
         await self.stop()
-
-    async def _create_stream_if_not_exists(self) -> None:
-        """Create stream using the same configuration as EventStore."""
-        from nats.js.api import RetentionPolicy, StorageType, StreamConfig
-
-        if self._js is None:
-            raise ConsumerError("JetStream context not initialized")
-
-        config = StreamConfig(
-            name=self.stream_name,
-            subjects=[f"{self.config.subject_prefix}.>"],
-            retention=RetentionPolicy.LIMITS,
-            storage=StorageType.FILE,
-            max_msgs=self.config.max_messages,
-            max_bytes=self.config.max_bytes,
-            max_age=self.config.max_age_seconds,
-            max_msg_size=self.config.max_msg_size,
-            duplicate_window=120,
-            num_replicas=self.config.replicas,
-        )
-
-        await self._js.add_stream(config)

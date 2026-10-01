@@ -1,0 +1,58 @@
+E   AssertionError: assert None == 'evt-123'
+E   assert 2 == 1
+E   RuntimeError: notifications down
+E   AssertionError: handler ran 1 times, event lost
+E   AssertionError: side effect executed 2 times
+E   AssertionError: poison message was dropped
+E   AssertionError: exhausted message was dropped
+E   ModuleNotFoundError: No module named 'tc_nats_events.consumers.dlq'
+E   assert [0, 1, 2, 3, 4, 99] == [99]
+E   Failed: DID NOT RAISE ValueError
+E   Failed: DID NOT RAISE Exception
+E   AssertionError: assert ['audit.7eb1ba12.>'] == ['audit.7eb1b...'b9982819a.>']
+E   AssertionError: assert None is <function TestStarHandler.test_star_handler_is_catch_all.<locals>.catch_all at 0x106f80040>
+E   AssertionError: assert 3 == 6
+E   AssertionError: loop dead: fetch calls=10, state=ConsumerState.STOPPED
+E   AssertionError: handler ran 2 times
+E   AssertionError: hung handler blocked the message
+E   AssertionError: assert 5 == 0
+E   AssertionError: redelivered tc-iam event executed 2 times
+E   AttributeError: 'DurableEventConsumer' object has no attribute '_advisories'
+E   ModuleNotFoundError: No module named 'tc_nats_events.idempotency'
+E   AssertionError: events lost during outage: [0, 1, 2, 3, 4]
+PASSED tests/audit/test_nats01_publish_dedupe.py::TestPublishHeaders::test_retry_reuses_msg_id
+PASSED tests/audit/test_nats01_publish_dedupe.py::TestPublishHeaders::test_duplicate_ack_returns_original_sequence
+PASSED tests/audit/test_nats04_05_09_11.py::TestDeliverPolicy::test_explicit_all_replays_history
+PASSED tests/audit/test_nats04_05_09_11.py::TestReplicas::test_production_r3_is_valid
+PASSED tests/audit/test_nats04_05_09_11.py::TestReplicas::test_development_allows_r1
+PASSED tests/audit/test_nats04_05_09_11.py::TestStarHandler::test_exact_handler_wins_over_star
+PASSED tests/audit/test_nats06_consumer_update.py::TestConsumerReconcile::test_existing_all_consumer_not_broken_by_new_default
+PASSED tests/audit/test_nats08_slow_handlers.py::TestSlowHandlers::test_batch_pending_msgs_not_redelivered
+PASSED tests/audit/test_review_hardening.py::TestReviewHardening::test_same_msg_id_on_other_subject_is_not_suppressed
+FAILED tests/audit/test_nats01_publish_dedupe.py::TestPublishHeaders::test_publish_sets_nats_msg_id
+FAILED tests/audit/test_nats01_publish_dedupe.py::TestPublishDedupeIntegration::test_lost_ack_does_not_duplicate
+FAILED tests/audit/test_nats01_publish_dedupe.py::TestPublishDedupeIntegration::test_same_event_id_twice_is_one_message
+FAILED tests/audit/test_nats02_idempotency.py::TestProcessorUnit::test_failed_handler_is_retried_not_cached
+FAILED tests/audit/test_nats02_idempotency.py::TestIdempotencyIntegration::test_notifications_down_then_recover
+FAILED tests/audit/test_nats02_idempotency.py::TestIdempotencyIntegration::test_dedupe_across_pods
+FAILED tests/audit/test_nats02_idempotency.py::TestIdempotencyIntegration::test_dedupe_survives_restart
+FAILED tests/audit/test_nats03_dlq.py::TestDeadLetterQueue::test_poison_message_goes_to_dlq_and_is_terminated
+FAILED tests/audit/test_nats03_dlq.py::TestDeadLetterQueue::test_exhausted_retries_go_to_dlq
+FAILED tests/audit/test_nats03_dlq.py::TestDeadLetterQueue::test_advisory_safety_net
+FAILED tests/audit/test_nats04_05_09_11.py::TestDeliverPolicy::test_new_durable_does_not_replay_history_by_default
+FAILED tests/audit/test_nats04_05_09_11.py::TestReplicas::test_production_requires_r3
+FAILED tests/audit/test_nats04_05_09_11.py::TestStreamSubjectsNotOverwritten::test_foreign_stream_subjects_not_overwritten
+FAILED tests/audit/test_nats04_05_09_11.py::TestStreamSubjectsNotOverwritten::test_superset_subjects_accepted
+FAILED tests/audit/test_nats04_05_09_11.py::TestStarHandler::test_star_handler_is_catch_all
+FAILED tests/audit/test_nats06_consumer_update.py::TestConsumerReconcile::test_consumer_config_is_updated_on_start
+FAILED tests/audit/test_nats06_consumer_update.py::TestConsumerReconcile::test_immutable_change_fails_fast
+FAILED tests/audit/test_nats07_supervisor.py::test_loop_restarts_after_consecutive_errors
+FAILED tests/audit/test_nats08_slow_handlers.py::TestSlowHandlers::test_slow_handler_not_redelivered
+FAILED tests/audit/test_nats08_slow_handlers.py::TestSlowHandlers::test_hung_handler_times_out_and_retries
+FAILED tests/audit/test_nats10_stream_info.py::test_publish_does_not_call_stream_info
+FAILED tests/audit/test_nats12_stable_key.py::test_adapter_event_redelivery_runs_once
+FAILED tests/audit/test_review_hardening.py::TestReviewHardening::test_advisory_for_processed_message_is_ignored
+FAILED tests/audit/test_review_hardening.py::TestReviewHardening::test_forged_advisory_is_rejected
+FAILED tests/audit/test_review_hardening.py::TestReviewHardening::test_lost_kv_write_response_keeps_lease
+FAILED tests/audit/test_verdict_scenario.py::test_audit_verdict_scenario - as...
+26 failed, 9 passed, 10 warnings in 243.32s (0:04:03)

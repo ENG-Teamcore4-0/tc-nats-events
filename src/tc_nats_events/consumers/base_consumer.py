@@ -5,7 +5,10 @@ Base Consumer
 Abstract base class for event consumers.
 """
 
+import asyncio
+import inspect
 import logging
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional
 
@@ -13,8 +16,28 @@ from ..models.event import Event
 
 logger = logging.getLogger(__name__)
 
-# Type alias for event handlers
-EventHandler = Callable[[Event], None]
+# Type alias for event handlers (sync or async)
+EventHandler = Callable[[Event], Any]
+
+CATCH_ALL = "*"
+
+
+async def invoke_handler(handler: EventHandler, event: Event) -> Any:
+    """
+    Call a sync or async handler and return its result.
+
+    Sync handlers run in the default executor so they cannot block heartbeats,
+    lease renewal or the handler timeout.
+    """
+    if inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(
+        getattr(handler, "__call__", None)
+    ):
+        return await handler(event)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, handler, event)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class BaseEventConsumer(ABC):
@@ -46,9 +69,18 @@ class BaseEventConsumer(ABC):
         Register a handler for a specific event type.
 
         Args:
-            event_type: Type of event to handle
+            event_type: Type of event to handle. ``"*"`` is accepted as an
+                alias of :meth:`register_default_handler` (deprecated).
             handler: Callable that processes the event
         """
+        if event_type == CATCH_ALL:
+            warnings.warn(
+                'register_handler("*") is deprecated; use register_default_handler()',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.register_default_handler(handler)
+            return
         self._handlers[event_type] = handler
         logger.info(f"Registered handler for event type: {event_type}")
 

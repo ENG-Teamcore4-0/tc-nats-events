@@ -14,7 +14,7 @@ Main features:
 - Structured logging and monitoring
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "TeamCore Platform Team"
 
 from .adapters import EventAdapter, FlexibleAdapter, GenericAdapter
@@ -23,6 +23,7 @@ from .core.event_store import NATSEventStore
 from .models.event import Event, EventMetadata, EventType, create_event
 from .publishers.event_publisher import EventPublisher
 from .utils.config import NATSConfig
+from .utils.exceptions import NonRetryableError
 from .utils.logging import setup_logging
 
 __all__ = [
@@ -43,5 +44,6 @@ __all__ = [
     "EventPublisher",
     # Utils
     "NATSConfig",
+    "NonRetryableError",
     "setup_logging",
 ]

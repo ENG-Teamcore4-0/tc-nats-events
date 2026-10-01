@@ -1,5 +1,5 @@
 # Core dependencies
-nats-py>=2.6.0
+nats-py>=2.10.0
 pyyaml>=6.0
 
 # Development dependencies (optional)

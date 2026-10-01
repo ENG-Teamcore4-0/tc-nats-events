@@ -40,3 +40,19 @@ class StreamConfigError(TCNATSError):
     """Raised when stream configuration fails."""
 
     pass
+
+
+class ConsumerConfigMismatchError(ConsumerError):
+    """An existing durable consumer differs in a field that cannot be updated."""
+
+    pass
+
+
+class NonRetryableError(TCNATSError):
+    """
+    Raise from a handler when retrying can never succeed (e.g. invalid payload).
+
+    The message is sent to the dead letter queue and terminated immediately.
+    """
+
+    pass

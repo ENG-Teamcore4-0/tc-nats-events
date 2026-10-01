@@ -14,15 +14,7 @@ import nats
 from nats.aio.client import Client as NATS
 from nats.errors import TimeoutError as NATSTimeoutError
 from nats.js import JetStreamContext
-from nats.js.api import (
-    AckPolicy,
-    ConsumerConfig,
-    DeliverPolicy,
-    ReplayPolicy,
-    RetentionPolicy,
-    StorageType,
-    StreamConfig,
-)
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, ReplayPolicy
 
 from ..models.event import Event
 from ..utils.config import NATSConfig
@@ -33,6 +25,12 @@ from ..utils.exceptions import (
     StreamConfigError,
 )
 from ..utils.metrics import get_metrics_collector
+from ..utils.server_version import ensure_server_version
+from .stream_config import (
+    build_stream_config,
+    event_subject_filter,
+    validate_existing_stream,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +62,8 @@ class NATSEventStore:
         # Stream configuration
         self.stream_name = config.stream_name
         self.subject_prefix = config.subject_prefix
+        # Effective dedupe window of the (possibly pre-existing) stream.
+        self.duplicate_window_seconds: float = config.duplicate_window_seconds
 
         # Connection state
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -90,6 +90,7 @@ class NATSEventStore:
                 return
 
             try:
+                self.config.validate()
                 logger.info(f"Connecting to NATS at {self.config.servers}")
 
                 # Connection options with resilience
@@ -111,6 +112,7 @@ class NATSEventStore:
                 self._nc = await nats.connect(
                     servers=self.config.servers, **connect_options
                 )
+                ensure_server_version(self._nc)
                 self._js = self._nc.jetstream()
 
                 # Ensure stream exists
@@ -163,102 +165,54 @@ class NATSEventStore:
 
     async def _ensure_stream_exists(self) -> None:
         """
-        Create or update stream configuration.
+        Create the stream, or validate an existing one without rewriting it.
 
         Raises:
-            StreamConfigError: If stream configuration fails
+            StreamConfigError: If the stream cannot serve this configuration
         """
+        if self._js is None:
+            raise EventStoreError("JetStream context not initialized")
         try:
-            # Check if stream exists
             try:
-                if self._js is None:
-                    raise EventStoreError("JetStream context not initialized")
                 stream_info = await self._js.stream_info(self.stream_name)
-                logger.info(f"Stream '{self.stream_name}' already exists")
-
-                # Update stream if subjects changed
-                current_subjects = (
-                    set(stream_info.config.subjects)
-                    if stream_info.config.subjects
-                    else set()
-                )
-                expected_subjects = {f"{self.subject_prefix}.>"}
-
-                if current_subjects != expected_subjects:
-                    await self._update_stream_config()
-
             except nats.js.errors.NotFoundError:
-                # Create new stream
                 await self._create_stream()
+                return
 
+            logger.info(f"Stream '{self.stream_name}' already exists")
+            warnings = validate_existing_stream(stream_info.config, self.config)
+            if stream_info.config.duplicate_window:
+                self.duplicate_window_seconds = float(
+                    stream_info.config.duplicate_window
+                )
+            for warning in warnings:
+                logger.warning(f"Stream '{self.stream_name}' drift: {warning}")
+            if warnings and self.config.allow_stream_update:
+                await self._update_stream_config(stream_info.config)
+
+        except StreamConfigError:
+            raise
         except Exception as e:
             logger.error(f"Stream configuration failed: {e}")
             raise StreamConfigError(f"Failed to configure stream: {e}")
 
     async def _create_stream(self) -> None:
-        """Create new stream with optimized configuration."""
-        # Create stream configuration with proper typing
-        config = StreamConfig(
-            name=self.stream_name,
-            subjects=[f"{self.subject_prefix}.>"],
-            # Persistence configuration for Event Sourcing
-            retention=RetentionPolicy.LIMITS,
-            storage=StorageType.FILE,  # Persistent storage
-            # Retention limits
-            max_msgs=self.config.max_messages,
-            max_bytes=self.config.max_bytes,
-            max_age=self.config.max_age_seconds,  # seconds as expected by NATS
-            # Performance settings
-            max_msg_size=self.config.max_msg_size,
-            duplicate_window=120,  # 2 minutes deduplication
-            # Replication for durability (production should use 3+)
-            num_replicas=self.config.replicas,
-        )
-
-        # Try to add optional parameters that might not exist in all versions
-        try:
-            # Test if StreamConfig accepts discard_new_per_subject
-            import inspect
-
-            sig = inspect.signature(StreamConfig.__init__)
-            if "discard_new_per_subject" in sig.parameters:
-                # Recreate config with the additional parameter
-                config = StreamConfig(
-                    name=self.stream_name,
-                    subjects=[f"{self.subject_prefix}.>"],
-                    retention=RetentionPolicy.LIMITS,
-                    storage=StorageType.FILE,
-                    max_msgs=self.config.max_messages,
-                    max_bytes=self.config.max_bytes,
-                    max_age=self.config.max_age_seconds,
-                    max_msg_size=self.config.max_msg_size,
-                    duplicate_window=120,
-                    num_replicas=self.config.replicas,
-                    discard_new_per_subject=False,
-                )
-                logger.debug("Added discard_new_per_subject parameter to stream config")
-        except Exception:
-            logger.debug(
-                "discard_new_per_subject not available in this nats-py version"
-            )
-
+        """Create new stream with the shared configuration."""
         if self._js is None:
             raise EventStoreError("JetStream context not initialized")
-        await self._js.add_stream(config)
+        await self._js.add_stream(build_stream_config(self.config))
         logger.info(f"Stream '{self.stream_name}' created successfully")
 
-    async def _update_stream_config(self) -> None:
-        """Update existing stream configuration."""
+    async def _update_stream_config(self, existing: Any) -> None:
+        """Apply retention/replica settings (explicit opt-in); keeps all subjects."""
         if self._js is None:
             raise EventStoreError("JetStream context not initialized")
-        stream_info = await self._js.stream_info(self.stream_name)
-
-        config = stream_info.config
-        config.subjects = [f"{self.subject_prefix}.>"]
-
-        if self._js is None:
-            raise EventStoreError("JetStream context not initialized")
-        await self._js.update_stream(config)
+        desired = build_stream_config(self.config)
+        subjects = list(existing.subjects or [])
+        if event_subject_filter(self.config) not in subjects:
+            subjects.append(event_subject_filter(self.config))
+        desired.subjects = subjects
+        await self._js.update_stream(desired)
         logger.info(f"Stream '{self.stream_name}' configuration updated")
 
     async def publish_event(self, event: Event) -> int:
@@ -292,6 +246,8 @@ class NATSEventStore:
                 raise EventStoreError("Event metadata is required for publishing")
 
             headers = {
+                # JetStream dedupe key (NATS-01); retries reuse the same id.
+                "Nats-Msg-Id": event.metadata.event_id,
                 "event-id": event.metadata.event_id,
                 "event-type": event.event_type,
                 "source-service": event.metadata.source_service or "unknown",
@@ -303,21 +259,21 @@ class NATSEventStore:
             if self._js is None:
                 raise EventStoreError("JetStream context not initialized")
 
-            # Ensure stream is ready before publishing
-            # This helps prevent "no response from stream" errors
-            try:
-                await self._js.stream_info(self.stream_name)
-            except Exception as e:
-                logger.warning(f"Stream may not be ready: {e}")
-                # Try to recreate the stream connection
-                await self._ensure_stream_exists()
-
+            # The stream is verified once in connect(); no per-publish round-trip
+            # (NATS-10). A missing stream surfaces as an error and is retried.
             ack = await self._js.publish(
                 subject=subject,
                 payload=event.to_json(),
                 headers=headers,
-                timeout=30.0,  # Increased timeout to 30 seconds
+                timeout=self.config.publish_timeout_seconds,
             )
+
+            if getattr(ack, "duplicate", False) is True:
+                self._metrics.record_reliability_event("publish_duplicate")
+                logger.info(
+                    f"Duplicate publish ignored by JetStream: "
+                    f"event_id={event.metadata.event_id}, sequence={ack.seq}"
+                )
 
             # Record metrics
             self._metrics.record_publish_success(start_time)

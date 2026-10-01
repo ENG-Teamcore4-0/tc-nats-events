@@ -6,6 +6,7 @@ Test the DurableEventConsumer class.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,27 +14,62 @@ import nats
 import pytest
 
 from tc_nats_events.adapters import FlexibleAdapter, GenericAdapter
+from tc_nats_events.consumers.consumer_config import build_consumer_config
 from tc_nats_events.consumers.durable_consumer import (
     ConsumerState,
     DurableEventConsumer,
 )
+from tc_nats_events.consumers.message_handler import MessageHandler
+from tc_nats_events.idempotency import IdempotentProcessor, MemoryIdempotencyStore
 from tc_nats_events.models.event import Event
-from tc_nats_events.utils.exceptions import ConsumerError
+from tc_nats_events.utils.exceptions import (
+    ConsumerConfigMismatchError,
+    ConsumerError,
+    NonRetryableError,
+)
+from tests.conftest import MockNATSMessage
 
 
 class TestDurableEventConsumer:
     """Test DurableEventConsumer class."""
 
     @pytest.fixture
-    def consumer(self, nats_config):
-        """Create a consumer instance."""
+    def config(self, nats_config):
+        """Config without DLQ: DLQ behavior is tested separately with a mock."""
+        return replace(nats_config, dlq_enabled=False)
+
+    @staticmethod
+    def _message_handler(consumer, dead_letters=None):
+        """The MessageHandler that _setup_consumer would build for ``consumer``."""
+        return MessageHandler(
+            consumer_name=consumer.consumer_name,
+            config=consumer.config,
+            adapters=consumer.adapters,
+            get_handler=consumer.get_handler,
+            processor=consumer._processor,
+            dead_letters=dead_letters,
+            metrics=consumer._metrics,
+            on_progress=consumer._mark_progress,
+        )
+
+    @pytest.fixture
+    def consumer(self, config):
+        """Create a consumer instance backed by an in-memory idempotency store."""
         consumer = DurableEventConsumer(
             service_name="test-service",
-            config=nats_config,
+            config=config,
             batch_size=5,
             fetch_timeout=1.0,
             auto_adapt=False,  # Disable auto-adaptation for tests
+            idempotency_store=MemoryIdempotencyStore(),
         )
+        consumer._processor = IdempotentProcessor(
+            MemoryIdempotencyStore(),
+            lease_seconds=config.idempotency_lease_seconds,
+            heartbeat_interval=config.heartbeat_interval_seconds,
+            handler_timeout=config.handler_timeout_seconds,
+        )
+        consumer._handler = self._message_handler(consumer)
         yield consumer
         # Clean up handlers and state between tests
         consumer._handlers.clear()
@@ -41,14 +77,12 @@ class TestDurableEventConsumer:
         consumer.events_processed = 0
         consumer.events_failed = 0
         consumer.last_processed_sequence = 0
-        # Reset idempotency processor to clear any cached state
-        consumer._idempotent_processor.store._store.clear()
         consumer._metrics.reset()
 
-    def test_consumer_initialization(self, consumer, nats_config):
+    def test_consumer_initialization(self, consumer, config):
         """Test consumer initialization."""
         assert consumer.service_name == "test-service"
-        assert consumer.config == nats_config
+        assert consumer.config == config
         assert consumer.batch_size == 5
         assert consumer.fetch_timeout == 1.0
         assert consumer.consumer_name == "test-service-consumer"
@@ -105,30 +139,77 @@ class TestDurableEventConsumer:
             with pytest.raises(ConsumerError, match="Consumer startup failed"):
                 await consumer.start()
 
+    @staticmethod
+    def _existing_info(config, consumer, **overrides):
+        """consumer_info result carrying a realistic ConsumerConfig."""
+        cfg = build_consumer_config(
+            config, consumer.consumer_name, consumer.subject_filter
+        )
+        info = MagicMock()
+        info.config = replace(cfg, **overrides)
+        info.delivered.stream_seq = 100
+        info.num_ack_pending = 5
+        return info
+
     @pytest.mark.asyncio
     async def test_setup_consumer_existing(
-        self, consumer, mock_jetstream, mock_subscription
+        self, consumer, config, mock_jetstream, mock_subscription
     ):
-        """Test setting up consumer when it already exists."""
+        """An up-to-date existing durable is bound as-is (no add_consumer)."""
         consumer._js = mock_jetstream
-
-        # Consumer exists
-        consumer_info = MagicMock()
-        consumer_info.delivered.stream_seq = 100
-        consumer_info.num_ack_pending = 5
-        mock_jetstream.consumer_info.return_value = consumer_info
+        mock_jetstream.consumer_info.return_value = self._existing_info(
+            config, consumer
+        )
         mock_jetstream.pull_subscribe = AsyncMock(return_value=mock_subscription)
 
         await consumer._setup_consumer()
 
         assert consumer._subscription == mock_subscription
+        assert consumer._processor is not None
         mock_jetstream.add_consumer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_setup_consumer_existing_editable_diff_updates(
+        self, consumer, config, mock_jetstream, mock_subscription
+    ):
+        """Editable drift is reconciled; deliver_policy of the durable is kept."""
+        from nats.js.api import DeliverPolicy
+
+        consumer._js = mock_jetstream
+        mock_jetstream.consumer_info.return_value = self._existing_info(
+            config, consumer, max_deliver=3, deliver_policy=DeliverPolicy.ALL
+        )
+        mock_jetstream.pull_subscribe = AsyncMock(return_value=mock_subscription)
+
+        await consumer._setup_consumer()
+
+        mock_jetstream.add_consumer.assert_called_once()
+        update = mock_jetstream.add_consumer.call_args[0][1]
+        assert update.max_deliver == config.max_deliver_attempts
+        assert update.deliver_policy == DeliverPolicy.ALL
+
+    @pytest.mark.asyncio
+    async def test_setup_consumer_existing_immutable_mismatch_fails(
+        self, consumer, config, mock_jetstream, mock_subscription
+    ):
+        """A durable with a different filter cannot be bound silently."""
+        consumer._js = mock_jetstream
+        mock_jetstream.consumer_info.return_value = self._existing_info(
+            config, consumer, filter_subject="other.events.>"
+        )
+        mock_jetstream.pull_subscribe = AsyncMock(return_value=mock_subscription)
+
+        with pytest.raises(ConsumerConfigMismatchError):
+            await consumer._setup_consumer()
+
+        mock_jetstream.add_consumer.assert_not_called()
+        mock_jetstream.pull_subscribe.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_setup_consumer_new(
         self, consumer, mock_jetstream, mock_subscription
     ):
-        """Test setting up new consumer."""
+        """New durables start at DeliverPolicy.NEW by default."""
         consumer._js = mock_jetstream
 
         # Consumer doesn't exist
@@ -145,8 +226,30 @@ class TestDurableEventConsumer:
         call_args = mock_jetstream.add_consumer.call_args[0][1]
         assert call_args.name == consumer.consumer_name
         assert call_args.durable_name == consumer.consumer_name
-        assert call_args.deliver_policy.value == "all"
+        assert call_args.deliver_policy.value == "new"
         assert call_args.ack_policy.value == "explicit"
+        assert call_args.max_deliver == 6
+
+    @pytest.mark.asyncio
+    async def test_setup_consumer_new_deliver_policy_all(
+        self, config, mock_jetstream, mock_subscription
+    ):
+        """deliver_policy='all' replays the stream for a new durable."""
+        consumer = DurableEventConsumer(
+            service_name="replay-service",
+            config=replace(config, deliver_policy="all"),
+            auto_adapt=False,
+            idempotency_store=MemoryIdempotencyStore(),
+        )
+        consumer._js = mock_jetstream
+        mock_jetstream.consumer_info.side_effect = nats.js.errors.NotFoundError()
+        mock_jetstream.add_consumer = AsyncMock()
+        mock_jetstream.pull_subscribe = AsyncMock(return_value=mock_subscription)
+
+        await consumer._setup_consumer()
+
+        call_args = mock_jetstream.add_consumer.call_args[0][1]
+        assert call_args.deliver_policy.value == "all"
 
     @pytest.mark.asyncio
     async def test_event_processing_loop(
@@ -155,6 +258,8 @@ class TestDurableEventConsumer:
         """Test event processing loop."""
         consumer._subscription = mock_subscription
         consumer._is_running = True
+        # The supervisor (not the fetch loop) moves the state to SYNCING
+        consumer._consumer_state = ConsumerState.SYNCING
 
         # Mock fetch to return messages then empty
         call_count = 0
@@ -213,28 +318,178 @@ class TestDurableEventConsumer:
         assert mock_nats_message.is_acked
 
     @pytest.mark.asyncio
-    async def test_process_message_handler_error(self, consumer, mock_nats_message):
-        """Test message processing with handler error."""
+    async def test_process_message_handler_error_naks_with_delay(
+        self, consumer, mock_nats_message
+    ):
+        """A failing handler no longer raises: the message is nak'ed with a delay."""
 
-        # Register failing handler
         def failing_handler(event: Event):
             raise Exception("Handler error")
 
         consumer.register_handler("test.created", failing_handler)
 
-        with pytest.raises(Exception, match="Handler error"):
-            await consumer._process_message(mock_nats_message)
+        await consumer._process_message(mock_nats_message)
 
         assert consumer.events_failed == 1
+        assert consumer.events_processed == 0
+        assert mock_nats_message.is_nacked
+        assert mock_nats_message.nak_delays == [consumer.config.nak_delays_seconds[0]]
+        assert not mock_nats_message.is_acked
+        assert not mock_nats_message.is_termed
+
+    @pytest.mark.asyncio
+    async def test_process_message_nak_delay_grows_with_deliveries(
+        self, consumer, mock_nats_message
+    ):
+        def failing_handler(event: Event):
+            raise Exception("boom")
+
+        consumer.register_handler("test.created", failing_handler)
+        mock_nats_message.metadata.num_delivered = 3
+
+        await consumer._process_message(mock_nats_message)
+
+        assert mock_nats_message.nak_delays == [consumer.config.nak_delays_seconds[2]]
+
+    @pytest.mark.asyncio
+    async def test_process_message_failure_is_retried_not_cached(
+        self, consumer, mock_nats_message
+    ):
+        """A redelivery after failure re-runs the handler and then acks."""
+        calls = 0
+
+        def flaky(event: Event):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise Exception("transient")
+
+        consumer.register_handler("test.created", flaky)
+
+        await consumer._process_message(mock_nats_message)
+        assert mock_nats_message.is_nacked and not mock_nats_message.is_acked
+
+        await consumer._process_message(mock_nats_message)
+        assert calls == 2
+        assert mock_nats_message.is_acked
+        assert consumer.events_processed == 1
+
+    @pytest.mark.asyncio
+    async def test_process_message_last_attempt_terminates_without_dlq(
+        self, consumer, mock_nats_message
+    ):
+        """Last delivery with DLQ disabled: term() instead of a silent nak loop."""
+
+        def failing_handler(event: Event):
+            raise Exception("always")
+
+        consumer.register_handler("test.created", failing_handler)
+        mock_nats_message.metadata.num_delivered = consumer.config.max_deliver_attempts
+
+        await consumer._process_message(mock_nats_message)
+
+        assert mock_nats_message.is_termed
+        assert not mock_nats_message.is_nacked
+        assert not mock_nats_message.is_acked
+
+    @pytest.mark.asyncio
+    async def test_process_message_last_attempt_goes_to_dlq(
+        self, consumer, mock_nats_message
+    ):
+        def failing_handler(event: Event):
+            raise ValueError("always")
+
+        consumer.register_handler("test.created", failing_handler)
+        dlq = MagicMock(publish=AsyncMock())
+        consumer._handler = self._message_handler(consumer, dlq)
+        mock_nats_message.metadata.num_delivered = consumer.config.max_deliver_attempts
+
+        await consumer._process_message(mock_nats_message)
+
+        dlq.publish.assert_awaited_once()
+        kwargs = dlq.publish.call_args.kwargs
+        assert kwargs["reason"] == "max_deliveries"
+        assert kwargs["stream_seq"] == 1
+        assert "ValueError" in kwargs["error"]
+        assert mock_nats_message.is_termed
+
+    @pytest.mark.asyncio
+    async def test_process_message_non_retryable_goes_to_dlq_immediately(
+        self, consumer, mock_nats_message
+    ):
+        def failing_handler(event: Event):
+            raise NonRetryableError("bad payload")
+
+        consumer.register_handler("test.created", failing_handler)
+        dlq = MagicMock(publish=AsyncMock())
+        consumer._handler = self._message_handler(consumer, dlq)
+
+        await consumer._process_message(mock_nats_message)  # first delivery
+
+        assert dlq.publish.call_args.kwargs["reason"] == ("non_retryable")
+        assert mock_nats_message.is_termed
+        assert not mock_nats_message.is_nacked
+
+    @pytest.mark.asyncio
+    async def test_process_message_dlq_publish_failure_naks_instead_of_dropping(
+        self, consumer, mock_nats_message
+    ):
+        """If the DLQ is unavailable the message is retried, never lost."""
+
+        def failing_handler(event: Event):
+            raise NonRetryableError("bad payload")
+
+        consumer.register_handler("test.created", failing_handler)
+        dlq = MagicMock(publish=AsyncMock(side_effect=RuntimeError("dlq down")))
+        consumer._handler = self._message_handler(consumer, dlq)
+
+        await consumer._process_message(mock_nats_message)
+
+        assert mock_nats_message.is_nacked
+        assert not mock_nats_message.is_termed
+
+    @pytest.mark.asyncio
+    async def test_process_message_poison_is_dead_lettered(self, consumer):
+        """Unparseable payloads are terminated immediately, never retried."""
+        msg = MockNATSMessage(b"not json at all", sequence=9)
+        dlq = MagicMock(publish=AsyncMock())
+        consumer._handler = self._message_handler(consumer, dlq)
+
+        await consumer._process_message(msg)
+
+        assert dlq.publish.call_args.kwargs["reason"] == "poison"
+        assert msg.is_termed
+        assert not msg.is_acked and not msg.is_nacked
+
+    @pytest.mark.asyncio
+    async def test_process_message_duplicate_is_skipped_and_acked(
+        self, consumer, mock_nats_message
+    ):
+        """A message already handled successfully is acked without re-running."""
+        calls = 0
+
+        def handler(event: Event):
+            nonlocal calls
+            calls += 1
+
+        consumer.register_handler("test.created", handler)
+
+        await consumer._process_message(mock_nats_message)
+        redelivery = MockNATSMessage(mock_nats_message.data, sequence=1)
+        await consumer._process_message(redelivery)
+
+        assert calls == 1
+        assert redelivery.is_acked
 
     @pytest.mark.asyncio
     async def test_process_message_no_handler(self, consumer, mock_nats_message):
-        """Test processing message with no handler."""
+        """Messages with no registered handler are acked and not counted."""
         # No handler registered
         await consumer._process_message(mock_nats_message)
 
-        assert consumer.events_processed == 1
         assert mock_nats_message.is_acked
+        assert consumer.events_processed == 0
+        assert consumer.events_failed == 0
 
     @pytest.mark.asyncio
     async def test_process_event_async_handler(self, consumer):

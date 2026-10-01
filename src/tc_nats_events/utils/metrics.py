@@ -31,6 +31,8 @@ class EventMetrics:
 
     # Error tracking
     error_counts: CounterType = field(default_factory=Counter)
+    # Delivery-guarantee signals: publish_duplicate, dead_lettered, lease_lost...
+    reliability_counts: CounterType = field(default_factory=Counter)
 
     # Stream metrics
     stream_sequences: Dict[str, int] = field(default_factory=dict)
@@ -68,6 +70,10 @@ class EventMetrics:
     def record_retry(self) -> None:
         """Record a retry attempt."""
         self.events_retried += 1
+
+    def record_reliability(self, name: str) -> None:
+        """Record a delivery-guarantee event (dedupe hit, DLQ, lease lost...)."""
+        self.reliability_counts[name] += 1
 
     def record_sequence(self, stream: str, sequence: int) -> None:
         """Record stream sequence."""
@@ -138,6 +144,7 @@ class EventMetrics:
             "publish_stats": self.get_publish_stats(),
             "consume_stats": self.get_consume_stats(),
             "error_counts": dict(self.error_counts),
+            "reliability_counts": dict(self.reliability_counts),
             "stream_sequences": self.stream_sequences.copy(),
             "consumer_lag": self.consumer_lag.copy(),
             "last_event_time": (
@@ -188,6 +195,11 @@ class MetricsCollector:
         """Record retry attempt."""
         with self._lock:
             self._metrics.record_retry()
+
+    def record_reliability_event(self, name: str) -> None:
+        """Record a delivery-guarantee event."""
+        with self._lock:
+            self._metrics.record_reliability(name)
 
     def record_stream_sequence(self, stream: str, sequence: int) -> None:
         """Record stream sequence."""

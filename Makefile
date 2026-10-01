@@ -25,12 +25,21 @@ install-dev:
 test:
 	pytest tests/ -v --cov=tc_nats_events --cov-report=term-missing --cov-report=html
 
+test-audit:
+	SKIP_INTEGRATION_TESTS=false pytest tests/audit -v --no-cov
+
+test-cluster:
+	docker compose -f tests/cluster/docker-compose.yml up -d
+	NATS_CLUSTER_URL=nats://localhost:14222,nats://localhost:14223,nats://localhost:14224 \
+		pytest tests/cluster -v --no-cov -m cluster
+	docker compose -f tests/cluster/docker-compose.yml down -v
+
 test-unit:
 	pytest tests/unit -v -m "not integration"
 
 test-integration:
 	@echo "Starting NATS server for integration tests..."
-	@docker run -d --name nats-test -p 4222:4222 nats:latest -js || true
+	@docker run -d --name nats-test -p 4222:4222 nats:2.10-alpine -js || true
 	@sleep 2
 	SKIP_INTEGRATION_TESTS=false pytest tests/integration -v -m integration
 	@docker stop nats-test && docker rm nats-test || true
@@ -72,7 +81,7 @@ serve-docs:
 
 dev-nats:
 	@echo "Starting NATS server for development..."
-	docker run --rm -it -p 4222:4222 -p 8222:8222 nats:latest -js -m 8222
+	docker run --rm -it -p 4222:4222 -p 8222:8222 nats:2.10-alpine -js -m 8222
 
 dev-example:
 	@echo "Running basic example..."
